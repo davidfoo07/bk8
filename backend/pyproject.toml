@@ -1,0 +1,24 @@
+[project]
+name = "courtedge-backend"
+version = "0.1.0"
+description = "CourtEdge — Polymarket NBA Betting Analysis Platform Backend"
+requires-python = ">=3.11"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+select = ["E", "F", "I", "N", "W", "UP", "B", "A", "SIM", "TCH"]
+
+[tool.ruff.isort]
+known-first-party = ["app"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
