@@ -677,16 +677,15 @@ def _find_polymarket_prices(
                 spread_candidates.append(mkt)
         elif "o/u" in q_lower or "over/under" in q_lower:
             # Only full-game totals, not player props or half totals
-            # Game totals contain both team nicknames OR "vs." in the question
             has_both_teams = home_nick in q_lower and away_nick in q_lower
             has_vs = "vs." in q_lower or "vs " in q_lower
             if (has_both_teams or has_vs) and not is_partial:
                 total_candidates.append(mkt)
         elif "vs." in q_lower or "vs " in q_lower:
-            if "spread" not in q_lower and "o/u" not in q_lower:
+            if "spread" not in q_lower and "o/u" not in q_lower and not is_partial:
                 moneyline_market = mkt
         elif home_nick in q_lower and away_nick in q_lower:
-            if "spread" not in q_lower and "o/u" not in q_lower:
+            if "spread" not in q_lower and "o/u" not in q_lower and not is_partial:
                 moneyline_market = mkt
 
     # ── Moneyline ──
