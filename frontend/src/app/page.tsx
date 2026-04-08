@@ -20,20 +20,24 @@ export default function Dashboard() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Injury overrides: { "Victor Wembanyama": "FULL", "Stephon Castle": "OFF" }
+  // Injury overrides — ref so toggles don't trigger re-renders of loadData
   const [injuryOverrides, setInjuryOverrides] = useState<Record<string, string>>({});
+  const overridesRef = useRef<Record<string, string>>({});
+  overridesRef.current = injuryOverrides;
 
-  const loadData = useCallback(async (isRefresh = false, overrides?: Record<string, string>) => {
+  /** Fetch data from backend (used for initial load + auto-refresh) */
+  const loadData = useCallback(async (isRefresh = false) => {
     if (isRefresh) {
       setRefreshing(true);
     } else {
       setLoading(true);
     }
     try {
-      const effectiveOverrides = overrides ?? injuryOverrides;
-      const hasOverrides = Object.keys(effectiveOverrides).length > 0;
+      // Use GET (cached) unless user has active overrides
+      const overrides = overridesRef.current;
+      const hasOverrides = Object.keys(overrides).length > 0;
       const result = hasOverrides
-        ? await api.getTodaysGamesWithOverrides(effectiveOverrides)
+        ? await api.getTodaysGamesWithOverrides(overrides)
         : await api.getTodaysGames();
       setData(result);
       setError(null);
@@ -48,9 +52,9 @@ export default function Dashboard() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [injuryOverrides]);
+  }, []); // No dependencies — uses ref for overrides
 
-  // Initial load + auto-refresh
+  // Initial load + auto-refresh (stable — won't re-run on override changes)
   useEffect(() => {
     loadData();
     timerRef.current = setInterval(() => loadData(true), AUTO_REFRESH_MS);
@@ -59,6 +63,7 @@ export default function Dashboard() {
     };
   }, [loadData]);
 
+  /** Hard refresh — clears all caches on backend */
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
@@ -71,26 +76,34 @@ export default function Dashboard() {
     }
     // Clear overrides on hard refresh
     setInjuryOverrides({});
-    await loadData(true, {});
+    overridesRef.current = {};
+    await loadData(true);
   };
 
-  /** Called from GameCard when user toggles a QUESTIONABLE player */
+  /** Called from GameCard when user toggles a QUESTIONABLE player.
+   *  Silently re-fetches with overrides — no spinner, no page jump.
+   *  Backend reuses cached raw data so this is instant (~50ms). */
   const handleInjuryToggle = useCallback(
     (playerName: string, mode: "FULL" | "HALF" | "OFF") => {
       setInjuryOverrides((prev) => {
         const next = { ...prev };
         if (mode === "HALF") {
-          // HALF is the default — remove override to restore default behavior
-          delete next[playerName];
+          delete next[playerName]; // HALF is default — remove override
         } else {
           next[playerName] = mode;
         }
-        // Immediately re-fetch with new overrides
-        setTimeout(() => loadData(true, next), 0);
+        // Fire & forget — silent background recalc
+        api
+          .getTodaysGamesWithOverrides(next)
+          .then((result) => {
+            setData(result);
+            setLastUpdated(new Date());
+          })
+          .catch((err) => console.error("Override recalculation failed:", err));
         return next;
       });
     },
-    [loadData]
+    []
   );
 
   const handleCopyFullSlate = async () => {

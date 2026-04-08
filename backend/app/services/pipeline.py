@@ -97,6 +97,9 @@ class PipelineCache:
 
 _cache = PipelineCache()
 
+# Cache for raw intermediate data so injury toggles don't re-fetch APIs
+_raw_data_cache: dict[str, Any] = {}
+
 
 # ─── Main Pipeline ──────────────────────────────────────────────────
 
@@ -108,17 +111,36 @@ async def run_daily_pipeline(
         game_date = date.today()
 
     cache_key = f"daily_{game_date.isoformat()}"
-    # Skip cache if user passed injury overrides (custom scenario)
+    raw_cache_key = f"raw_{game_date.isoformat()}"
+
+    # If no overrides, try returning fully cached result
     if not injury_overrides:
         cached = _cache.get(cache_key, ttl_seconds=300)
         if cached is not None:
             logger.info(f"Returning cached analysis for {game_date}")
             return cached
 
+    # If overrides are present and we have cached raw data, skip ALL API fetches
+    # Just re-run the analytics with the new overrides — instant response
+    if injury_overrides and raw_cache_key in _raw_data_cache:
+        raw = _raw_data_cache[raw_cache_key]
+        ts = raw.get("_timestamp")
+        # Use raw cache for up to 10 minutes
+        if ts and (datetime.now(timezone.utc) - ts).total_seconds() < 600:
+            logger.info(f"♻️ Reusing cached raw data for override recalculation")
+            return await _recalculate_with_overrides(
+                game_date=game_date,
+                raw_data=raw,
+                injury_overrides=injury_overrides,
+            )
+        else:
+            logger.info("Raw data cache expired, will re-fetch")
+            del _raw_data_cache[raw_cache_key]
+
     logger.info(f"=== Starting live pipeline for {game_date} ===")
     warnings: list[str] = []
 
-    # Step 1: Fetch today's schedule
+    # Step 1: Fetch today's schedule (now cached)
     games_raw = await _fetch_todays_games(game_date, warnings)
     if not games_raw:
         logger.warning("No games found for today. Returning empty analysis.")
@@ -141,6 +163,18 @@ async def run_daily_pipeline(
     ratings_data, injuries_data, polymarket_events, player_metrics = await asyncio.gather(
         ratings_task, injuries_task, polymarket_task, player_metrics_task
     )
+
+    # Cache raw data for instant override recalculation
+    _raw_data_cache[raw_cache_key] = {
+        "games_raw": games_raw,
+        "ratings_data": ratings_data,
+        "standings_data": standings_data,
+        "injuries_data": injuries_data,
+        "polymarket_events": polymarket_events,
+        "player_metrics": player_metrics,
+        "warnings": list(warnings),
+        "_timestamp": datetime.now(timezone.utc),
+    }
 
     # Step 3: Process each game
     game_analyses: list[GameAnalysis] = []
@@ -185,11 +219,71 @@ async def run_daily_pipeline(
     return result
 
 
+async def _recalculate_with_overrides(
+    game_date: date,
+    raw_data: dict[str, Any],
+    injury_overrides: dict[str, str],
+) -> DailyAnalysis:
+    """Re-run ONLY the analytics step using cached raw data.
+    This is instant — no API calls, just math."""
+
+    games_raw = raw_data["games_raw"]
+    ratings_data = raw_data["ratings_data"]
+    standings_data = raw_data["standings_data"]
+    injuries_data = raw_data["injuries_data"]
+    polymarket_events = raw_data["polymarket_events"]
+    player_metrics = raw_data["player_metrics"]
+    warnings = list(raw_data["warnings"])
+
+    game_analyses: list[GameAnalysis] = []
+    for game_raw in games_raw:
+        try:
+            away_abbr = game_raw["away_team"]
+            home_abbr = game_raw["home_team"]
+            event_key = f"{away_abbr}@{home_abbr}"
+            game_event = polymarket_events.get(event_key)
+
+            analysis = await _process_single_game(
+                game_raw=game_raw,
+                game_date=game_date,
+                ratings_data=ratings_data,
+                standings_data=standings_data,
+                injuries_data=injuries_data,
+                player_metrics=player_metrics,
+                polymarket_event=game_event,
+                warnings=warnings,
+                injury_overrides=injury_overrides,
+            )
+            game_analyses.append(analysis)
+        except Exception as e:
+            logger.error(f"Failed to recalculate game {game_raw.get('game_id', '?')}: {e}")
+
+    top_edges = _extract_top_edges(game_analyses)
+
+    logger.info(
+        f"♻️ Override recalculation complete: {len(game_analyses)} games "
+        f"(0 API calls, overrides={injury_overrides})"
+    )
+
+    return DailyAnalysis(
+        date=game_date,
+        games_count=len(game_analyses),
+        games=game_analyses,
+        top_edges=top_edges,
+    )
+
+
 # ─── Step 1: Fetch Schedule ────────────────────────────────────────
 
 async def _fetch_todays_games(
     game_date: date, warnings: list[str]
 ) -> list[dict[str, Any]]:
+    cache_key = f"schedule_{game_date.isoformat()}"
+    cached = _cache.get(cache_key, ttl_seconds=600)
+    if cached is not None:
+        logger.info(f"Using cached schedule ({len(cached)} games)")
+        return cached
+
     nba = NBAApiConnector()
     try:
         raw_games = await nba.get_todays_games(game_date)
@@ -220,6 +314,7 @@ async def _fetch_todays_games(
                 "venue": venue,
                 "raw": g,
             })
+        _cache.set(cache_key, games)
         return games
     except Exception as e:
         logger.error(f"Failed to fetch today's games: {e}")
@@ -714,7 +809,7 @@ def _find_polymarket_prices(
         q_lower = question.lower()
 
         # Skip first-half (1H), quarter (1Q/2Q), and player prop markets
-        is_partial = any(tag in q_lower for tag in ["1h ", "2h ", "1q ", "2q ", "3q ", "4q ", "1h:", "2h:"])
+        is_partial = any(tag in q_lower for tag in ["1h ", "2h ", "1q ", "2q ", "1h:", "2h:"])
 
         if "spread" in q_lower:
             if not is_partial:
@@ -1003,4 +1098,5 @@ def _extract_top_edges(games: list[GameAnalysis]) -> list[TopEdge]:
 
 def clear_pipeline_cache() -> None:
     _cache.clear()
-    logger.info("Pipeline cache cleared")
+    _raw_data_cache.clear()
+    logger.info("Pipeline cache cleared (including raw data cache)")
