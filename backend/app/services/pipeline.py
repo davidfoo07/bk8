@@ -1102,11 +1102,20 @@ def _extract_top_edges(games: list[GameAnalysis]) -> list[TopEdge]:
             if market.edge.verdict in ("STRONG BUY", "BUY"):
                 # Use real team names for selection
                 if market_type == "total":
-                    selection = f"{market.edge.best_side} {market.line}" if market.line else market.edge.best_side
+                    line_str = f" {market.line}" if market.line else ""
+                    selection = f"{market.edge.best_side}{line_str} ({game.away.team}/{game.home.team})"
+                elif market_type == "spread":
+                    if market.edge.best_side == home_nick:
+                        spread_str = f" {market.line:+g}" if market.line else ""
+                        selection = f"{game.home.team}{spread_str} vs {game.away.team}"
+                    else:
+                        # Away team covers — flip the spread sign
+                        spread_str = f" {-market.line:+g}" if market.line else ""
+                        selection = f"{game.away.team}{spread_str} @ {game.home.team}"
                 elif market.edge.best_side == home_nick:
-                    selection = f"{game.home.team} {market_type}"
+                    selection = f"{game.home.team} ML vs {game.away.team}"
                 else:
-                    selection = f"{game.away.team} {market_type}"
+                    selection = f"{game.away.team} ML @ {game.home.team}"
 
                 # Price for the recommended side
                 if market.edge.best_side in (home_nick, "Over"):
