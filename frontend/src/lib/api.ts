@@ -22,6 +22,13 @@ async function fetchJSON<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export interface SavedDateEntry {
+  date: string;
+  games_count: number;
+  saved_at: string | null;
+  file_size_kb: number;
+}
+
 export const api = {
   /** Get full analysis for today's games */
   getTodaysGames: () => fetchJSON<DailyAnalysis>("/games/today"),
@@ -38,6 +45,15 @@ export const api = {
 
   /** Get detailed analysis for a specific game */
   getGame: (gameId: string) => fetchJSON<GameAnalysis>(`/games/${gameId}`),
+
+  /** Get upcoming games (today + saved predictions for future games) */
+  getUpcomingGames: () => fetchJSON<DailyAnalysis>("/games/upcoming"),
+
+  /** List all saved prediction dates */
+  getHistoryDates: () => fetchJSON<SavedDateEntry[]>("/games/history"),
+
+  /** Load saved predictions for a specific date */
+  getHistoryForDate: (date: string) => fetchJSON<DailyAnalysis>(`/games/history/${date}`),
 
   /** Log a new bet */
   createBet: (bet: BetCreate) =>

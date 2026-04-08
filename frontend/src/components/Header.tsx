@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
 
 export default function Header() {
   const [currentTime, setCurrentTime] = useState("");
+  const pathname = usePathname();
 
   useEffect(() => {
     const update = () => {
@@ -24,6 +26,13 @@ export default function Header() {
     return () => clearInterval(timer);
   }, []);
 
+  const navLinks = [
+    { href: "/", label: "Dashboard" },
+    { href: "/history", label: "History" },
+    { href: "/bets", label: "Bet Tracker" },
+    { href: "/accuracy", label: "Model Accuracy" },
+  ];
+
   return (
     <header className="border-b border-[#1e293b] bg-[#111827] px-6 py-4">
       <div className="flex items-center justify-between max-w-7xl mx-auto">
@@ -37,15 +46,17 @@ export default function Header() {
         </div>
         <div className="flex items-center gap-6">
           <nav className="flex gap-4 text-sm">
-            <a href="/" className="text-[#e2e8f0] hover:text-[#2979FF] transition-colors">
-              Dashboard
-            </a>
-            <a href="/bets" className="text-[#94a3b8] hover:text-[#2979FF] transition-colors">
-              Bet Tracker
-            </a>
-            <a href="/accuracy" className="text-[#94a3b8] hover:text-[#2979FF] transition-colors">
-              Model Accuracy
-            </a>
+            {navLinks.map((link) => (
+              <a
+                key={link.href}
+                href={link.href}
+                className={`hover:text-[#2979FF] transition-colors ${
+                  pathname === link.href ? "text-[#e2e8f0]" : "text-[#94a3b8]"
+                }`}
+              >
+                {link.label}
+              </a>
+            ))}
           </nav>
           <span className="text-xs text-[#64748b] font-mono">{currentTime}</span>
         </div>

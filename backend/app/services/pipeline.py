@@ -31,6 +31,7 @@ from app.schemas.game import DailyAnalysis, GameAnalysis, TeamGameData, TopEdge
 from app.schemas.market import EdgeResult, MarketEdge
 from app.schemas.prediction import DataQuality, GamePrediction
 from app.schemas.team import InjurySchema, PlayerAbsence, ScheduleContext
+from app.services.prediction_store import save_predictions
 
 
 # ─── NBA Team ID ↔ Abbreviation maps ───────────────────────────────
@@ -216,6 +217,13 @@ async def run_daily_pipeline(
         f"=== Pipeline complete: {len(game_analyses)} games, "
         f"{len(top_edges)} edges, {len(warnings)} warnings ==="
     )
+
+    # Persist predictions to disk
+    try:
+        save_predictions(result)
+    except Exception as e:
+        logger.warning(f"Failed to save predictions: {e}")
+
     return result
 
 
@@ -265,12 +273,20 @@ async def _recalculate_with_overrides(
         f"(0 API calls, overrides={injury_overrides})"
     )
 
-    return DailyAnalysis(
+    result = DailyAnalysis(
         date=game_date,
         games_count=len(game_analyses),
         games=game_analyses,
         top_edges=top_edges,
     )
+
+    # Persist override predictions to disk
+    try:
+        save_predictions(result)
+    except Exception as e:
+        logger.warning(f"Failed to save override predictions: {e}")
+
+    return result
 
 
 # ─── Step 1: Fetch Schedule ────────────────────────────────────────

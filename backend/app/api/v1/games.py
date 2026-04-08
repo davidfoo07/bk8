@@ -11,6 +11,7 @@ from app.schemas.market import EdgeResult, MarketEdge
 from app.schemas.prediction import DataQuality, GamePrediction
 from app.schemas.team import AdjustedRatings, InjurySchema, ScheduleContext
 from app.services.pipeline import clear_pipeline_cache, run_daily_pipeline
+from app.services.prediction_store import list_saved_dates, load_predictions
 
 router = APIRouter(prefix="/games", tags=["Games"])
 
@@ -73,6 +74,98 @@ async def get_todays_games_with_overrides(body: InjuryOverrideRequest) -> DailyA
             games=[],
             top_edges=[],
         )
+
+
+# ─── History Endpoints ──────────────────────────────────────────────
+
+
+@router.get("/history", response_model=list[dict])
+async def get_prediction_history() -> list[dict]:
+    """List all dates that have saved predictions.
+    
+    Returns [{date, games_count, saved_at, file_size_kb}] sorted by date desc.
+    """
+    return list_saved_dates()
+
+
+@router.get("/history/{game_date}", response_model=DailyAnalysis)
+async def get_predictions_for_date(game_date: str) -> DailyAnalysis:
+    """Load saved predictions for a specific date.
+    
+    Date format: YYYY-MM-DD (e.g. 2026-04-08)
+    """
+    try:
+        parsed_date = date.fromisoformat(game_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid date format: {game_date}. Use YYYY-MM-DD.")
+    
+    analysis = load_predictions(parsed_date)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail=f"No saved predictions for {game_date}")
+    
+    return analysis
+
+
+@router.get("/upcoming", response_model=DailyAnalysis)
+async def get_upcoming_games() -> DailyAnalysis:
+    """Get all games that haven't tipped off yet — merges today's live data
+    with any saved predictions for games still in the future.
+    
+    This is what the dashboard should use so you never miss a game that was
+    predicted yesterday but tips off today.
+    """
+    now_utc = datetime.now(timezone.utc)
+    today = date.today()
+    
+    # 1. Get today's live analysis
+    try:
+        today_analysis = await run_daily_pipeline()
+    except Exception as e:
+        logger.error(f"Pipeline failed for upcoming: {e}")
+        today_analysis = DailyAnalysis(date=today, games_count=0, games=[], top_edges=[])
+    
+    # Collect all upcoming games, keyed by game_id to dedupe
+    upcoming: dict[str, GameAnalysis] = {}
+    
+    # Add today's games that haven't tipped off (or all if no tipoff info)
+    for game in today_analysis.games:
+        if game.tipoff is None or game.tipoff > now_utc:
+            upcoming[game.game_id] = game
+        # Also include games that tipped off within last 3 hours (still in progress)
+        elif game.tipoff and (now_utc - game.tipoff).total_seconds() < 10800:
+            upcoming[game.game_id] = game
+    
+    # 2. Check saved predictions from yesterday/day-before for late games
+    # (e.g., games predicted yesterday at 10am SGT that play at 11am SGT today)
+    for days_back in range(1, 3):
+        past_date = today - __import__("datetime").timedelta(days=days_back)
+        saved = load_predictions(past_date)
+        if saved:
+            for game in saved.games:
+                # Only add if game hasn't tipped off yet and not already in list
+                if game.game_id not in upcoming:
+                    if game.tipoff and game.tipoff > now_utc:
+                        upcoming[game.game_id] = game
+    
+    # Sort by tipoff time
+    sorted_games = sorted(
+        upcoming.values(),
+        key=lambda g: g.tipoff or datetime.max.replace(tzinfo=timezone.utc),
+    )
+    
+    # Rebuild top edges from the merged set
+    from app.services.pipeline import _extract_top_edges
+    top_edges = _extract_top_edges(sorted_games)
+    
+    return DailyAnalysis(
+        date=today,
+        games_count=len(sorted_games),
+        games=sorted_games,
+        top_edges=top_edges,
+    )
+
+
+# ─── Existing Endpoints ─────────────────────────────────────────────
 
 
 @router.get("/today/ai-prompt", response_model=dict)
