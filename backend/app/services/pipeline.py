@@ -127,13 +127,14 @@ async def run_daily_pipeline(game_date: date | None = None) -> DailyAnalysis:
     # Phase 2a: Standings first (needed as fallback for ratings)
     standings_data = await _fetch_standings(warnings)
 
-    # Phase 2b: Ratings + injuries + Polymarket in parallel
+    # Phase 2b: Ratings + injuries + Polymarket + player metrics in parallel
     ratings_task = _fetch_team_ratings(warnings, standings_fallback=standings_data)
     injuries_task = _fetch_injuries(warnings)
     polymarket_task = _fetch_all_polymarket_events(games_raw, game_date, warnings)
+    player_metrics_task = _fetch_player_metrics(warnings)
 
-    ratings_data, injuries_data, polymarket_events = await asyncio.gather(
-        ratings_task, injuries_task, polymarket_task
+    ratings_data, injuries_data, polymarket_events, player_metrics = await asyncio.gather(
+        ratings_task, injuries_task, polymarket_task, player_metrics_task
     )
 
     # Step 3: Process each game
@@ -151,6 +152,7 @@ async def run_daily_pipeline(game_date: date | None = None) -> DailyAnalysis:
                 ratings_data=ratings_data,
                 standings_data=standings_data,
                 injuries_data=injuries_data,
+                player_metrics=player_metrics,
                 polymarket_event=game_event,
                 warnings=warnings,
             )
@@ -412,6 +414,39 @@ async def _fetch_all_polymarket_events(
         await poly.close()
 
 
+async def _fetch_player_metrics(
+    warnings: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Fetch per-player estimated metrics → {player_name: stats_dict}.
+
+    Used to calculate real injury impact (E_NET_RATING × minutes_share).
+    Cached for 1 hour since these don't change during a game day.
+    """
+    cached = _cache.get("player_metrics", ttl_seconds=3600)
+    if cached:
+        return cached
+
+    nba = NBAApiConnector()
+    result: dict[str, dict[str, Any]] = {}
+    try:
+        raw = await nba.get_player_estimated_metrics()
+        for row in raw:
+            name = row.get("PLAYER_NAME", "")
+            if name:
+                result[name] = row
+        if result:
+            logger.info(f"✅ Fetched estimated metrics for {len(result)} players")
+            _cache.set("player_metrics", result)
+        else:
+            logger.warning("playerestimatedmetrics returned 0 rows")
+    except Exception as e:
+        logger.error(f"Failed to fetch player metrics: {e}")
+        warnings.append(f"Player metrics unavailable: {e}")
+    finally:
+        await nba.close()
+    return result
+
+
 # ─── Step 3: Process Single Game ───────────────────────────────────
 
 async def _process_single_game(
@@ -420,6 +455,7 @@ async def _process_single_game(
     ratings_data: dict[str, dict[str, float]],
     standings_data: dict[str, dict[str, Any]],
     injuries_data: dict[str, list[dict[str, Any]]],
+    player_metrics: dict[str, dict[str, Any]],
     polymarket_event: dict[str, Any] | None,
     warnings: list[str],
 ) -> GameAnalysis:
@@ -443,9 +479,9 @@ async def _process_single_game(
     home_injuries_raw = injuries_data.get(home_abbr, [])
     away_injuries_raw = injuries_data.get(away_abbr, [])
 
-    # Player absences
-    home_absences = _build_player_absences(home_injuries_raw)
-    away_absences = _build_player_absences(away_injuries_raw)
+    # Player absences with real per-player impact from NBA stats
+    home_absences = _build_player_absences(home_injuries_raw, player_metrics)
+    away_absences = _build_player_absences(away_injuries_raw, player_metrics)
 
     # Lineup-adjusted ratings
     home_adj = _lineup_model.calculate_adjusted_ratings(
@@ -803,16 +839,77 @@ def _pick_best_total(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 # ─── Helper Functions ───────────────────────────────────────────────
 
-def _build_player_absences(injuries_raw: list[dict[str, Any]]) -> list[PlayerAbsence]:
+def _build_player_absences(
+    injuries_raw: list[dict[str, Any]],
+    player_metrics: dict[str, dict[str, Any]] | None = None,
+) -> list[PlayerAbsence]:
+    """Build player absence list with real per-player impact from NBA stats.
+
+    Impact formula:
+      minutes_share = player_min / 48.0  (fraction of game minutes)
+      nrtg_impact = E_NET_RATING × minutes_share × 0.6  (diminishing factor)
+
+    A star like Wemby (E_NET=+16.4, 29 min) → 16.4 × 0.608 × 0.6 = +5.98 NRtg lost
+    A bench guy (E_NET=+2.0, 12 min) → 2.0 × 0.25 × 0.6 = +0.30 NRtg lost
+    """
     absences: list[PlayerAbsence] = []
+    pm = player_metrics or {}
+
     for inj in injuries_raw:
         status = inj.get("status", "OUT").upper()
         if status not in ("OUT", "DOUBTFUL"):
             continue
+
+        player_name = inj.get("player_name", "Unknown")
+
+        # Look up real stats
+        stats = pm.get(player_name)
+
+        if stats:
+            minutes = float(stats.get("MIN", 0) or 0)
+            e_off = float(stats.get("E_OFF_RATING", 112) or 112)
+            e_def = float(stats.get("E_DEF_RATING", 112) or 112)
+            e_net = float(stats.get("E_NET_RATING", 0) or 0)
+            e_usg = float(stats.get("E_USG_PCT", 0.2) or 0.2)
+
+            # Minutes share: what fraction of the 48-minute game this player uses
+            min_share = minutes / 48.0
+
+            # Impact: how much the team's ratings change without this player
+            # Weighted by minutes share and a dampening factor (0.6)
+            # because replacement players partially fill the gap
+            dampening = 0.6
+            # League average ratings (~112 ORtg, ~112 DRtg)
+            league_avg_ortg = 112.0
+            league_avg_drtg = 112.0
+
+            # This player's contribution above/below average, scaled by their time on court
+            ortg_impact = -(e_off - league_avg_ortg) * min_share * dampening
+            drtg_impact = (e_def - league_avg_drtg) * min_share * dampening
+            nrtg_impact = -e_net * min_share * dampening
+
+            logger.debug(
+                f"  Injury impact: {player_name} ({status}) — "
+                f"E_NET={e_net:+.1f}, MIN={minutes:.1f}, "
+                f"NRtg impact={nrtg_impact:+.2f}"
+            )
+        else:
+            # Fallback: unknown player gets small default impact
+            min_share = 0.15
+            ortg_impact = -0.5
+            drtg_impact = 0.3
+            nrtg_impact = -0.8
+            logger.debug(f"  Injury impact: {player_name} ({status}) — no stats, using default")
+
         absences.append(PlayerAbsence(
-            player_id=inj.get("player_id", "unknown"), name=inj.get("player_name", "Unknown"),
-            status=status, reason=inj.get("reason"),
-            ortg_impact=-1.5, drtg_impact=1.0, nrtg_impact=-2.5, minutes_share=0.25,
+            player_id=inj.get("player_id", "unknown"),
+            name=player_name,
+            status=status,
+            reason=inj.get("reason"),
+            ortg_impact=round(ortg_impact, 2),
+            drtg_impact=round(drtg_impact, 2),
+            nrtg_impact=round(nrtg_impact, 2),
+            minutes_share=round(min_share, 3),
         ))
     return absences
 
