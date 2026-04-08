@@ -102,6 +102,19 @@ _cache = PipelineCache()
 _raw_data_cache: dict[str, Any] = {}
 
 
+
+def _get_nba_game_date() -> date:
+    """Get today's date in US Eastern time.
+    
+    NBA schedules games by Eastern Time date. A game listed as April 9
+    might tip off at 7am SGT on April 10. Using ET date ensures we always
+    query the right day from the NBA API regardless of server timezone.
+    """
+    et = timezone(timedelta(hours=-4))  # EDT (Apr-Nov)
+    now_et = datetime.now(et)
+    return now_et.date()
+
+
 # ─── Main Pipeline ──────────────────────────────────────────────────
 
 async def run_daily_pipeline(
@@ -109,7 +122,7 @@ async def run_daily_pipeline(
     injury_overrides: dict[str, str] | None = None,
 ) -> DailyAnalysis:
     if game_date is None:
-        game_date = date.today()
+        game_date = _get_nba_game_date()
 
     cache_key = f"daily_{game_date.isoformat()}"
     raw_cache_key = f"raw_{game_date.isoformat()}"

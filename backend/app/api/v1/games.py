@@ -1,6 +1,6 @@
 """Game analysis API endpoints — wired to live data pipeline."""
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Query
 from loguru import logger
@@ -10,7 +10,7 @@ from app.schemas.game import DailyAnalysis, GameAnalysis, TeamGameData, TopEdge
 from app.schemas.market import EdgeResult, MarketEdge
 from app.schemas.prediction import DataQuality, GamePrediction
 from app.schemas.team import AdjustedRatings, InjurySchema, ScheduleContext
-from app.services.pipeline import clear_pipeline_cache, run_daily_pipeline
+from app.services.pipeline import _get_nba_game_date, clear_pipeline_cache, run_daily_pipeline
 from app.services.prediction_store import list_saved_dates, load_predictions
 
 router = APIRouter(prefix="/games", tags=["Games"])
@@ -33,7 +33,7 @@ class InjuryOverrideRequest(BaseModel):
 @router.get("/today", response_model=DailyAnalysis)
 async def get_todays_games() -> DailyAnalysis:
     """
-    Get full analysis for all games today.
+    Get full analysis for today's NBA games (using US Eastern date).
     This is THE main endpoint for both the dashboard and AI consumption.
     Pulls live data from NBA API, Polymarket, and injury feeds.
     """
@@ -45,7 +45,7 @@ async def get_todays_games() -> DailyAnalysis:
     except Exception as e:
         logger.error(f"Pipeline failed: {e}")
         return DailyAnalysis(
-            date=date.today(),
+            date=_get_nba_game_date(),
             games_count=0,
             games=[],
             top_edges=[],
@@ -69,7 +69,7 @@ async def get_todays_games_with_overrides(body: InjuryOverrideRequest) -> DailyA
     except Exception as e:
         logger.error(f"Pipeline with overrides failed: {e}")
         return DailyAnalysis(
-            date=date.today(),
+            date=_get_nba_game_date(),
             games_count=0,
             games=[],
             top_edges=[],
@@ -108,21 +108,21 @@ async def get_predictions_for_date(game_date: str) -> DailyAnalysis:
 
 @router.get("/upcoming", response_model=DailyAnalysis)
 async def get_upcoming_games() -> DailyAnalysis:
-    """Get all games that haven't tipped off yet — merges today's live data
-    with any saved predictions for games still in the future.
+    """Get all games that haven't tipped off yet.
     
-    This is what the dashboard should use so you never miss a game that was
-    predicted yesterday but tips off today.
+    Merges today's live data (using ET date for the NBA API) with saved
+    predictions for games still in the future. This ensures you see games 
+    at 7am SGT that were filed under yesterday's ET date.
     """
     now_utc = datetime.now(timezone.utc)
-    today = date.today()
+    et_date = _get_nba_game_date()
     
-    # 1. Get today's live analysis
+    # 1. Get today's live analysis (uses ET date internally)
     try:
         today_analysis = await run_daily_pipeline()
     except Exception as e:
         logger.error(f"Pipeline failed for upcoming: {e}")
-        today_analysis = DailyAnalysis(date=today, games_count=0, games=[], top_edges=[])
+        today_analysis = DailyAnalysis(date=et_date, games_count=0, games=[], top_edges=[])
     
     # Collect all upcoming games, keyed by game_id to dedupe
     upcoming: dict[str, GameAnalysis] = {}
@@ -135,14 +135,14 @@ async def get_upcoming_games() -> DailyAnalysis:
         elif game.tipoff and (now_utc - game.tipoff).total_seconds() < 10800:
             upcoming[game.game_id] = game
     
-    # 2. Check saved predictions from yesterday/day-before for late games
-    # (e.g., games predicted yesterday at 10am SGT that play at 11am SGT today)
+    # 2. Check saved predictions from recent days for games not yet tipped off
+    # Covers edge case: predicted at 1am SGT, game tips at 10am SGT (same ET date
+    # but different local date)
     for days_back in range(1, 3):
-        past_date = today - __import__("datetime").timedelta(days=days_back)
+        past_date = et_date - timedelta(days=days_back)
         saved = load_predictions(past_date)
         if saved:
             for game in saved.games:
-                # Only add if game hasn't tipped off yet and not already in list
                 if game.game_id not in upcoming:
                     if game.tipoff and game.tipoff > now_utc:
                         upcoming[game.game_id] = game
@@ -158,7 +158,7 @@ async def get_upcoming_games() -> DailyAnalysis:
     top_edges = _extract_top_edges(sorted_games)
     
     return DailyAnalysis(
-        date=today,
+        date=et_date,
         games_count=len(sorted_games),
         games=sorted_games,
         top_edges=top_edges,
