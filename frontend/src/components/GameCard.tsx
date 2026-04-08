@@ -21,10 +21,7 @@ interface GameCardProps {
 
 /** Is the recommended side the "home" side of the market? */
 function isHomeSide(m: GameAnalysis["markets"][string]): boolean {
-  // home_label is set by the backend (e.g. "Nuggets", "Spurs", "Over")
-  // best_side now uses real names instead of YES/NO
   if (m.home_label) return m.edge.best_side === m.home_label;
-  // Legacy fallback
   return m.edge.best_side === "YES";
 }
 
@@ -38,12 +35,19 @@ function getBestEv(m: GameAnalysis["markets"][string]): number {
   return isHomeSide(m) ? m.edge.yes_ev : m.edge.no_ev;
 }
 
+/** Format a line value with sign */
+function formatLine(line: number | null | undefined, type: string): string {
+  if (line == null) return "";
+  if (type === "total") return `O/U ${line}`;
+  return line > 0 ? `+${line}` : `${line}`;
+}
+
 export default function GameCard({ game }: GameCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
 
   const bestMarket = Object.entries(game.markets).reduce(
-    (best, [key, m]) => (m.edge.best_edge > (best?.edge.best_edge || 0) ? m : best),
+    (best, [, m]) => (m.edge.best_edge > (best?.edge.best_edge || 0) ? m : best),
     Object.values(game.markets)[0]
   );
 
@@ -72,11 +76,8 @@ export default function GameCard({ game }: GameCardProps) {
 
   return (
     <div className="bg-[#111827] border border-[#1e293b] rounded-lg overflow-hidden hover:border-[#334155] transition-colors">
-      {/* Collapsed View — Always visible */}
-      <div
-        className="p-4 cursor-pointer"
-        onClick={() => setExpanded(!expanded)}
-      >
+      {/* Collapsed View */}
+      <div className="p-4 cursor-pointer" onClick={() => setExpanded(!expanded)}>
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-3">
             <h3 className="text-lg font-semibold text-[#e2e8f0]">
@@ -157,9 +158,7 @@ export default function GameCard({ game }: GameCardProps) {
         {/* Best edge badge */}
         {bestMarket && (
           <div className="flex items-center gap-2">
-            <span
-              className={`text-xs px-2 py-0.5 rounded border font-semibold ${getVerdictBg(bestMarket.edge.verdict)}`}
-            >
+            <span className={`text-xs px-2 py-0.5 rounded border font-semibold ${getVerdictBg(bestMarket.edge.verdict)}`}>
               {bestMarket.edge.verdict}
             </span>
             <span className="text-sm text-[#e2e8f0]">
@@ -175,46 +174,127 @@ export default function GameCard({ game }: GameCardProps) {
       {/* Expanded View */}
       {expanded && (
         <div className="border-t border-[#1e293b] p-4 bg-[#0d1320]">
-          {/* Market edges table */}
-          <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-2">
-            Polymarket Edges
+
+          {/* ── Polymarket Live Prices ── */}
+          <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-3">
+            <span className="text-[#00C853]">●</span> Polymarket Live
           </h4>
-          <div className="overflow-x-auto">
+          <div className="grid gap-2 mb-4">
+            {Object.entries(game.markets).map(([type, m]) => {
+              const homeLabel = m.home_label || game.home.team;
+              const awayLabel = m.away_label || game.away.team;
+              const homePrice = m.polymarket_home_yes || 0;
+              const awayPrice = m.polymarket_home_no || 0;
+              const lineStr = m.line != null ? ` ${formatLine(m.line, type)}` : "";
+              const bestSide = m.edge.best_side;
+
+              return (
+                <div key={type} className="flex items-center gap-3 bg-[#1a2235] rounded-lg p-3">
+                  {/* Market type label */}
+                  <div className="w-20 shrink-0">
+                    <span className="text-xs font-semibold text-[#94a3b8] uppercase">{type}</span>
+                    {m.line != null && (
+                      <p className="text-[10px] text-[#64748b] font-mono">{formatLine(m.line, type)}</p>
+                    )}
+                  </div>
+
+                  {/* Two-button Polymarket style */}
+                  <div className="flex gap-2 flex-1">
+                    {/* Home / Yes side */}
+                    <div
+                      className={`flex-1 flex items-center justify-between rounded-md px-3 py-2 border transition-colors ${
+                        bestSide === homeLabel
+                          ? "border-[#00C853]/50 bg-[#00C853]/10"
+                          : "border-[#1e293b] bg-[#111827]"
+                      }`}
+                    >
+                      <span className={`text-sm font-medium ${bestSide === homeLabel ? "text-[#00C853]" : "text-[#e2e8f0]"}`}>
+                        {homeLabel}{type === "spread" && m.line != null ? ` ${formatLine(m.line, "spread")}` : ""}
+                      </span>
+                      <span className={`text-sm font-mono font-bold ${bestSide === homeLabel ? "text-[#00C853]" : "text-[#e2e8f0]"}`}>
+                        {Math.round(homePrice * 100)}¢
+                      </span>
+                    </div>
+
+                    {/* Away / No side */}
+                    <div
+                      className={`flex-1 flex items-center justify-between rounded-md px-3 py-2 border transition-colors ${
+                        bestSide === awayLabel
+                          ? "border-[#00C853]/50 bg-[#00C853]/10"
+                          : "border-[#1e293b] bg-[#111827]"
+                      }`}
+                    >
+                      <span className={`text-sm font-medium ${bestSide === awayLabel ? "text-[#00C853]" : "text-[#e2e8f0]"}`}>
+                        {awayLabel}{type === "spread" && m.line != null ? ` ${formatLine(m.line != null ? -m.line : null, "spread")}` : ""}
+                      </span>
+                      <span className={`text-sm font-mono font-bold ${bestSide === awayLabel ? "text-[#00C853]" : "text-[#e2e8f0]"}`}>
+                        {Math.round(awayPrice * 100)}¢
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Model vs Market comparison */}
+                  <div className="w-24 text-right shrink-0">
+                    <p className="text-xs text-[#64748b]">Model</p>
+                    <p className="text-sm font-mono text-[#e2e8f0] font-semibold">
+                      {formatPct(m.model_probability)}
+                    </p>
+                  </div>
+
+                  {/* Edge + Verdict */}
+                  <div className="w-28 text-right shrink-0">
+                    <p className={`text-sm font-mono font-bold ${getVerdictColor(m.edge.verdict)}`}>
+                      {formatEdge(m.edge.best_edge)}
+                    </p>
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded border font-semibold ${getVerdictBg(m.edge.verdict)}`}>
+                      {m.edge.verdict}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* ── Edge Details Table (compact) ── */}
+          <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-2">
+            Edge Details
+          </h4>
+          <div className="overflow-x-auto mb-4">
             <table className="w-full text-sm font-mono">
               <thead>
                 <tr className="text-xs text-[#64748b] uppercase">
-                  <th className="text-left py-1 pr-4">Market</th>
-                  <th className="text-left py-1 pr-4">Side</th>
-                  <th className="text-right py-1 pr-4">Price</th>
-                  <th className="text-right py-1 pr-4">Model</th>
-                  <th className="text-right py-1 pr-4">Edge</th>
-                  <th className="text-right py-1 pr-4">EV/$</th>
-                  <th className="text-right py-1 pr-4">Kelly</th>
+                  <th className="text-left py-1 pr-3">Market</th>
+                  <th className="text-left py-1 pr-3">Pick</th>
+                  <th className="text-right py-1 pr-3">Poly</th>
+                  <th className="text-right py-1 pr-3">Model</th>
+                  <th className="text-right py-1 pr-3">Edge</th>
+                  <th className="text-right py-1 pr-3">EV/$</th>
+                  <th className="text-right py-1 pr-3">Kelly</th>
                   <th className="text-left py-1">Verdict</th>
                 </tr>
               </thead>
               <tbody>
                 {Object.entries(game.markets).map(([type, m]) => (
                   <tr key={type} className="border-t border-[#1e293b]">
-                    <td className="py-2 pr-4 text-[#e2e8f0] capitalize">{type}</td>
-                    <td className="py-2 pr-4 text-[#e2e8f0]">{m.edge.best_side}</td>
-                    <td className="py-2 pr-4 text-right text-[#e2e8f0]">
+                    <td className="py-1.5 pr-3 text-[#e2e8f0] capitalize">{type}</td>
+                    <td className="py-1.5 pr-3 text-[#e2e8f0]">{m.edge.best_side}</td>
+                    <td className="py-1.5 pr-3 text-right text-[#e2e8f0]">
                       {formatPrice(getBestPrice(m))}
                     </td>
-                    <td className="py-2 pr-4 text-right text-[#e2e8f0]">
+                    <td className="py-1.5 pr-3 text-right text-[#e2e8f0]">
                       {formatPct(m.model_probability)}
                     </td>
-                    <td className={`py-2 pr-4 text-right font-semibold ${getVerdictColor(m.edge.verdict)}`}>
+                    <td className={`py-1.5 pr-3 text-right font-semibold ${getVerdictColor(m.edge.verdict)}`}>
                       {formatEdge(m.edge.best_edge)}
                     </td>
-                    <td className="py-2 pr-4 text-right text-[#94a3b8]">
+                    <td className="py-1.5 pr-3 text-right text-[#94a3b8]">
                       ${getBestEv(m).toFixed(2)}
                     </td>
-                    <td className="py-2 pr-4 text-right text-[#94a3b8]">
+                    <td className="py-1.5 pr-3 text-right text-[#94a3b8]">
                       {m.edge.suggested_bet_pct.toFixed(1)}%
                     </td>
-                    <td className="py-2">
-                      <span className={`text-xs px-2 py-0.5 rounded border font-semibold ${getVerdictBg(m.edge.verdict)}`}>
+                    <td className="py-1.5">
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded border font-semibold ${getVerdictBg(m.edge.verdict)}`}>
                         {m.edge.verdict}
                       </span>
                     </td>
