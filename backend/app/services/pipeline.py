@@ -100,15 +100,20 @@ _cache = PipelineCache()
 
 # ─── Main Pipeline ──────────────────────────────────────────────────
 
-async def run_daily_pipeline(game_date: date | None = None) -> DailyAnalysis:
+async def run_daily_pipeline(
+    game_date: date | None = None,
+    injury_overrides: dict[str, str] | None = None,
+) -> DailyAnalysis:
     if game_date is None:
         game_date = date.today()
 
     cache_key = f"daily_{game_date.isoformat()}"
-    cached = _cache.get(cache_key, ttl_seconds=300)
-    if cached is not None:
-        logger.info(f"Returning cached analysis for {game_date}")
-        return cached
+    # Skip cache if user passed injury overrides (custom scenario)
+    if not injury_overrides:
+        cached = _cache.get(cache_key, ttl_seconds=300)
+        if cached is not None:
+            logger.info(f"Returning cached analysis for {game_date}")
+            return cached
 
     logger.info(f"=== Starting live pipeline for {game_date} ===")
     warnings: list[str] = []
@@ -155,6 +160,7 @@ async def run_daily_pipeline(game_date: date | None = None) -> DailyAnalysis:
                 player_metrics=player_metrics,
                 polymarket_event=game_event,
                 warnings=warnings,
+                injury_overrides=injury_overrides,
             )
             game_analyses.append(analysis)
         except Exception as e:
@@ -170,7 +176,8 @@ async def run_daily_pipeline(game_date: date | None = None) -> DailyAnalysis:
         games=game_analyses,
         top_edges=top_edges,
     )
-    _cache.set(cache_key, result)
+    if not injury_overrides:
+        _cache.set(cache_key, result)
     logger.info(
         f"=== Pipeline complete: {len(game_analyses)} games, "
         f"{len(top_edges)} edges, {len(warnings)} warnings ==="
@@ -458,6 +465,7 @@ async def _process_single_game(
     player_metrics: dict[str, dict[str, Any]],
     polymarket_event: dict[str, Any] | None,
     warnings: list[str],
+    injury_overrides: dict[str, str] | None = None,
 ) -> GameAnalysis:
     home_abbr = game_raw["home_team"]
     away_abbr = game_raw["away_team"]
@@ -480,8 +488,8 @@ async def _process_single_game(
     away_injuries_raw = injuries_data.get(away_abbr, [])
 
     # Player absences with real per-player impact from NBA stats
-    home_absences = _build_player_absences(home_injuries_raw, player_metrics)
-    away_absences = _build_player_absences(away_injuries_raw, player_metrics)
+    home_absences = _build_player_absences(home_injuries_raw, player_metrics, injury_overrides)
+    away_absences = _build_player_absences(away_injuries_raw, player_metrics, injury_overrides)
 
     # Lineup-adjusted ratings
     home_adj = _lineup_model.calculate_adjusted_ratings(
@@ -842,25 +850,49 @@ def _pick_best_total(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
 def _build_player_absences(
     injuries_raw: list[dict[str, Any]],
     player_metrics: dict[str, dict[str, Any]] | None = None,
+    injury_overrides: dict[str, str] | None = None,
 ) -> list[PlayerAbsence]:
     """Build player absence list with real per-player impact from NBA stats.
 
-    Impact formula:
-      minutes_share = player_min / 48.0  (fraction of game minutes)
-      nrtg_impact = E_NET_RATING × minutes_share × 0.6  (diminishing factor)
+    Three-state override for QUESTIONABLE players (user-controlled via frontend):
+      "FULL" → 100% miss weight (user knows they're sitting)
+      "HALF" → 50% miss weight (uncertain — default for QUESTIONABLE)
+      "OFF"  → 0% — excluded, user thinks they'll play
 
-    A star like Wemby (E_NET=+16.4, 29 min) → 16.4 × 0.608 × 0.6 = +5.98 NRtg lost
-    A bench guy (E_NET=+2.0, 12 min) → 2.0 × 0.25 × 0.6 = +0.30 NRtg lost
+    OUT/DOUBTFUL always use 100%/75% — not overridable.
+
+    Impact formula:
+      nrtg_impact = -E_NET_RATING × (MIN/48) × 0.6 × miss_probability
     """
+    # Default miss probability by status
+    DEFAULT_MISS: dict[str, float] = {
+        "OUT": 1.0,
+        "DOUBTFUL": 0.75,
+        "QUESTIONABLE": 0.50,
+    }
+
+    overrides = injury_overrides or {}
     absences: list[PlayerAbsence] = []
     pm = player_metrics or {}
 
     for inj in injuries_raw:
         status = inj.get("status", "OUT").upper()
-        if status not in ("OUT", "DOUBTFUL"):
-            continue
-
         player_name = inj.get("player_name", "Unknown")
+
+        # Determine miss probability
+        if player_name in overrides:
+            mode = overrides[player_name].upper()
+            if mode == "FULL":
+                miss_prob = 1.0
+            elif mode == "HALF":
+                miss_prob = 0.5
+            else:  # OFF
+                miss_prob = 0.0
+        else:
+            miss_prob = DEFAULT_MISS.get(status, 0.0)
+
+        if miss_prob <= 0:
+            continue  # PROBABLE or overridden OFF — skip
 
         # Look up real stats
         stats = pm.get(player_name)
@@ -870,36 +902,30 @@ def _build_player_absences(
             e_off = float(stats.get("E_OFF_RATING", 112) or 112)
             e_def = float(stats.get("E_DEF_RATING", 112) or 112)
             e_net = float(stats.get("E_NET_RATING", 0) or 0)
-            e_usg = float(stats.get("E_USG_PCT", 0.2) or 0.2)
 
-            # Minutes share: what fraction of the 48-minute game this player uses
             min_share = minutes / 48.0
-
-            # Impact: how much the team's ratings change without this player
-            # Weighted by minutes share and a dampening factor (0.6)
-            # because replacement players partially fill the gap
             dampening = 0.6
-            # League average ratings (~112 ORtg, ~112 DRtg)
             league_avg_ortg = 112.0
             league_avg_drtg = 112.0
 
-            # This player's contribution above/below average, scaled by their time on court
-            ortg_impact = -(e_off - league_avg_ortg) * min_share * dampening
-            drtg_impact = (e_def - league_avg_drtg) * min_share * dampening
-            nrtg_impact = -e_net * min_share * dampening
+            ortg_impact = -(e_off - league_avg_ortg) * min_share * dampening * miss_prob
+            drtg_impact = (e_def - league_avg_drtg) * min_share * dampening * miss_prob
+            nrtg_impact = -e_net * min_share * dampening * miss_prob
 
             logger.debug(
-                f"  Injury impact: {player_name} ({status}) — "
+                f"  Injury impact: {player_name} ({status}, {miss_prob:.0%} miss) — "
                 f"E_NET={e_net:+.1f}, MIN={minutes:.1f}, "
                 f"NRtg impact={nrtg_impact:+.2f}"
             )
         else:
-            # Fallback: unknown player gets small default impact
             min_share = 0.15
-            ortg_impact = -0.5
-            drtg_impact = 0.3
-            nrtg_impact = -0.8
-            logger.debug(f"  Injury impact: {player_name} ({status}) — no stats, using default")
+            ortg_impact = -0.5 * miss_prob
+            drtg_impact = 0.3 * miss_prob
+            nrtg_impact = -0.8 * miss_prob
+            logger.debug(
+                f"  Injury impact: {player_name} ({status}, {miss_prob:.0%} miss) — "
+                f"no stats, using default"
+            )
 
         absences.append(PlayerAbsence(
             player_id=inj.get("player_id", "unknown"),

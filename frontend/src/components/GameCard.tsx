@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { GameAnalysis } from "@/types/api";
+import type { GameAnalysis, InjuryInfo } from "@/types/api";
 import {
   getVerdictBg,
   getVerdictColor,
@@ -17,6 +17,8 @@ import {
 
 interface GameCardProps {
   game: GameAnalysis;
+  injuryOverrides: Record<string, string>;
+  onInjuryToggle: (playerName: string, mode: "FULL" | "HALF" | "OFF") => void;
 }
 
 /** Is the recommended side the "home" side of the market? */
@@ -42,7 +44,130 @@ function formatLine(line: number | null | undefined, type: string): string {
   return line > 0 ? `+${line}` : `${line}`;
 }
 
-export default function GameCard({ game }: GameCardProps) {
+/** Get override mode for a player, or "HALF" as default for QUESTIONABLE */
+function getOverrideMode(
+  playerName: string,
+  status: string,
+  overrides: Record<string, string>
+): "FULL" | "HALF" | "OFF" | null {
+  if (status !== "QUESTIONABLE") return null; // Only QUESTIONABLE gets toggles
+  if (playerName in overrides) {
+    return overrides[playerName] as "FULL" | "HALF" | "OFF";
+  }
+  return "HALF"; // Default
+}
+
+/** Cycle to next state: OFF → HALF → FULL → OFF */
+function nextMode(current: "FULL" | "HALF" | "OFF"): "FULL" | "HALF" | "OFF" {
+  if (current === "OFF") return "HALF";
+  if (current === "HALF") return "FULL";
+  return "OFF";
+}
+
+// ─── 3-State Toggle Button ────────────────────────────────────────
+
+function InjuryToggle({
+  mode,
+  onToggle,
+}: {
+  mode: "FULL" | "HALF" | "OFF";
+  onToggle: () => void;
+}) {
+  const config = {
+    FULL: {
+      label: "OUT",
+      bg: "bg-[#FF1744]/20",
+      border: "border-[#FF1744]/50",
+      text: "text-[#FF1744]",
+      title: "Definitely missing — full impact. Click to cycle.",
+    },
+    HALF: {
+      label: "50%",
+      bg: "bg-[#FFD600]/15",
+      border: "border-[#FFD600]/40",
+      text: "text-[#FFD600]",
+      title: "Uncertain — 50% weighted impact. Click to cycle.",
+    },
+    OFF: {
+      label: "IN",
+      bg: "bg-[#00C853]/15",
+      border: "border-[#00C853]/40",
+      text: "text-[#00C853]",
+      title: "Expected to play — excluded from impact. Click to cycle.",
+    },
+  };
+
+  const c = config[mode];
+
+  return (
+    <button
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle();
+      }}
+      title={c.title}
+      className={`
+        inline-flex items-center justify-center
+        w-10 h-5 rounded text-[10px] font-bold
+        border transition-all cursor-pointer select-none
+        ${c.bg} ${c.border} ${c.text}
+        hover:brightness-125 active:scale-95
+      `}
+    >
+      {c.label}
+    </button>
+  );
+}
+
+// ─── Injury Row ───────────────────────────────────────────────────
+
+function InjuryRow({
+  injury,
+  overrideMode,
+  onToggle,
+}: {
+  injury: InjuryInfo;
+  overrideMode: "FULL" | "HALF" | "OFF" | null;
+  onToggle: (playerName: string, mode: "FULL" | "HALF" | "OFF") => void;
+}) {
+  const isQuestionable = overrideMode !== null;
+
+  return (
+    <div className="flex items-center gap-2">
+      {/* Toggle (only for QUESTIONABLE) */}
+      {isQuestionable ? (
+        <InjuryToggle
+          mode={overrideMode}
+          onToggle={() => onToggle(injury.player_name, nextMode(overrideMode))}
+        />
+      ) : (
+        <span className="inline-flex items-center justify-center w-10 h-5 rounded text-[10px] font-bold border bg-[#FF1744]/20 border-[#FF1744]/50 text-[#FF1744]">
+          OUT
+        </span>
+      )}
+      {/* Player name */}
+      <span
+        className={`text-xs ${
+          overrideMode === "OFF"
+            ? "text-[#64748b] line-through"
+            : "text-[#94a3b8]"
+        }`}
+      >
+        {injury.player_name}
+      </span>
+      {/* Reason (condensed) */}
+      {injury.reason && (
+        <span className="text-[10px] text-[#475569] truncate max-w-[140px]">
+          {injury.reason}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ─── Main Component ──────────────────────────────────────────────
+
+export default function GameCard({ game, injuryOverrides, onInjuryToggle }: GameCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -73,6 +198,16 @@ export default function GameCard({ game }: GameCardProps) {
       setTimeout(() => setCopied(false), 2000);
     }
   };
+
+  // Combine home + away injuries
+  const allInjuries = [
+    ...game.home.injuries.map((i) => ({ ...i, side: "home" as const })),
+    ...game.away.injuries.map((i) => ({ ...i, side: "away" as const })),
+  ];
+
+  const homeQuestionable = game.home.injuries.filter((i) => i.status === "QUESTIONABLE");
+  const awayQuestionable = game.away.injuries.filter((i) => i.status === "QUESTIONABLE");
+  const hasQuestionable = homeQuestionable.length > 0 || awayQuestionable.length > 0;
 
   return (
     <div className="bg-[#111827] border border-[#1e293b] rounded-lg overflow-hidden hover:border-[#334155] transition-colors">
@@ -139,19 +274,33 @@ export default function GameCard({ game }: GameCardProps) {
           </div>
         </div>
 
-        {/* Quick injuries */}
+        {/* Quick injuries — compact summary with toggle hints */}
         <div className="flex gap-4 text-xs text-[#94a3b8] mb-3">
           <span>
             {game.home.team}:{" "}
             {game.home.injuries.length > 0
-              ? game.home.injuries.slice(0, 2).map((i) => `${i.player_name} (${i.status})`).join(", ")
+              ? game.home.injuries.slice(0, 3).map((i) => {
+                  const mode = getOverrideMode(i.player_name, i.status, injuryOverrides);
+                  const statusLabel = mode !== null
+                    ? (mode === "FULL" ? "OUT*" : mode === "OFF" ? "IN*" : "GTD")
+                    : i.status;
+                  return `${i.player_name} (${statusLabel})`;
+                }).join(", ")
               : "Full strength"}
+            {game.home.injuries.length > 3 && ` +${game.home.injuries.length - 3}`}
           </span>
           <span>
             {game.away.team}:{" "}
             {game.away.injuries.length > 0
-              ? game.away.injuries.slice(0, 2).map((i) => `${i.player_name} (${i.status})`).join(", ")
+              ? game.away.injuries.slice(0, 3).map((i) => {
+                  const mode = getOverrideMode(i.player_name, i.status, injuryOverrides);
+                  const statusLabel = mode !== null
+                    ? (mode === "FULL" ? "OUT*" : mode === "OFF" ? "IN*" : "GTD")
+                    : i.status;
+                  return `${i.player_name} (${statusLabel})`;
+                }).join(", ")
               : "Full strength"}
+            {game.away.injuries.length > 3 && ` +${game.away.injuries.length - 3}`}
           </span>
         </div>
 
@@ -175,6 +324,62 @@ export default function GameCard({ game }: GameCardProps) {
       {expanded && (
         <div className="border-t border-[#1e293b] p-4 bg-[#0d1320]">
 
+          {/* ── Injury Report with Toggles ── */}
+          {(game.home.injuries.length > 0 || game.away.injuries.length > 0) && (
+            <div className="mb-4">
+              <div className="flex items-center gap-2 mb-2">
+                <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider">
+                  Injury Report
+                </h4>
+                {hasQuestionable && (
+                  <span className="text-[10px] text-[#FFD600] bg-[#FFD600]/10 px-1.5 py-0.5 rounded">
+                    Click GTD toggles to adjust
+                  </span>
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                {/* Home injuries */}
+                <div>
+                  <p className="text-[10px] text-[#64748b] font-semibold uppercase mb-1">
+                    {game.home.team}
+                  </p>
+                  <div className="space-y-1">
+                    {game.home.injuries.map((inj) => (
+                      <InjuryRow
+                        key={inj.player_id || inj.player_name}
+                        injury={inj}
+                        overrideMode={getOverrideMode(inj.player_name, inj.status, injuryOverrides)}
+                        onToggle={onInjuryToggle}
+                      />
+                    ))}
+                    {game.home.injuries.length === 0 && (
+                      <span className="text-xs text-[#4CAF50]">Full strength</span>
+                    )}
+                  </div>
+                </div>
+                {/* Away injuries */}
+                <div>
+                  <p className="text-[10px] text-[#64748b] font-semibold uppercase mb-1">
+                    {game.away.team}
+                  </p>
+                  <div className="space-y-1">
+                    {game.away.injuries.map((inj) => (
+                      <InjuryRow
+                        key={inj.player_id || inj.player_name}
+                        injury={inj}
+                        overrideMode={getOverrideMode(inj.player_name, inj.status, injuryOverrides)}
+                        onToggle={onInjuryToggle}
+                      />
+                    ))}
+                    {game.away.injuries.length === 0 && (
+                      <span className="text-xs text-[#4CAF50]">Full strength</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* ── Polymarket Live Prices ── */}
           <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-3">
             <span className="text-[#00C853]">●</span> Polymarket Live
@@ -185,7 +390,6 @@ export default function GameCard({ game }: GameCardProps) {
               const awayLabel = m.away_label || game.away.team;
               const homePrice = m.polymarket_home_yes || 0;
               const awayPrice = m.polymarket_home_no || 0;
-              const lineStr = m.line != null ? ` ${formatLine(m.line, type)}` : "";
               const bestSide = m.edge.best_side;
 
               return (
@@ -200,7 +404,6 @@ export default function GameCard({ game }: GameCardProps) {
 
                   {/* Two-button Polymarket style */}
                   <div className="flex gap-2 flex-1">
-                    {/* Home / Yes side */}
                     <div
                       className={`flex-1 flex items-center justify-between rounded-md px-3 py-2 border transition-colors ${
                         bestSide === homeLabel
@@ -216,7 +419,6 @@ export default function GameCard({ game }: GameCardProps) {
                       </span>
                     </div>
 
-                    {/* Away / No side */}
                     <div
                       className={`flex-1 flex items-center justify-between rounded-md px-3 py-2 border transition-colors ${
                         bestSide === awayLabel

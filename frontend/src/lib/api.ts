@@ -26,6 +26,13 @@ export const api = {
   /** Get full analysis for today's games */
   getTodaysGames: () => fetchJSON<DailyAnalysis>("/games/today"),
 
+  /** Get full analysis with injury overrides (recalculates from scratch) */
+  getTodaysGamesWithOverrides: (injuryOverrides: Record<string, string>) =>
+    fetchJSON<DailyAnalysis>("/games/today", {
+      method: "POST",
+      body: JSON.stringify({ injury_overrides: injuryOverrides }),
+    }),
+
   /** Get AI-formatted prompt for today's games */
   getAiPrompt: () => fetchJSON<{ prompt: string; format: string; date: string }>("/games/today/ai-prompt"),
 
@@ -41,17 +48,4 @@ export const api = {
 
   /** Get bet history with stats */
   getBetHistory: () => fetchJSON<BetHistoryResponse>("/bets/history"),
-
-  /** Override a player's injury status */
-  overrideInjury: (data: {
-    player_name: string;
-    player_id: string;
-    team: string;
-    status: string;
-    reason?: string;
-  }) =>
-    fetchJSON("/injuries/override", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
 };

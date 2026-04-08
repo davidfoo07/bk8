@@ -4,6 +4,7 @@ from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query
 from loguru import logger
+from pydantic import BaseModel
 
 from app.schemas.game import DailyAnalysis, GameAnalysis, TeamGameData, TopEdge
 from app.schemas.market import EdgeResult, MarketEdge
@@ -15,6 +16,17 @@ router = APIRouter(prefix="/games", tags=["Games"])
 
 # ─── In-memory store for game lookups within a session ──────────────
 _last_analysis: DailyAnalysis | None = None
+
+
+class InjuryOverrideRequest(BaseModel):
+    """Request body for customizing QUESTIONABLE player handling.
+
+    injury_overrides: dict of player_name → mode
+      "FULL" = definitely missing (100% impact)
+      "HALF" = uncertain (50% impact) — default for QUESTIONABLE
+      "OFF"  = expected to play (0% impact, excluded)
+    """
+    injury_overrides: dict[str, str] = {}
 
 
 @router.get("/today", response_model=DailyAnalysis)
@@ -31,7 +43,30 @@ async def get_todays_games() -> DailyAnalysis:
         return analysis
     except Exception as e:
         logger.error(f"Pipeline failed: {e}")
-        # Return empty analysis with error warning rather than crashing
+        return DailyAnalysis(
+            date=date.today(),
+            games_count=0,
+            games=[],
+            top_edges=[],
+        )
+
+
+@router.post("/today", response_model=DailyAnalysis)
+async def get_todays_games_with_overrides(body: InjuryOverrideRequest) -> DailyAnalysis:
+    """
+    Get full analysis with custom injury overrides.
+    Use this to toggle QUESTIONABLE players between FULL/HALF/OFF.
+    Bypasses cache so you get fresh recalculation.
+    """
+    global _last_analysis
+    try:
+        analysis = await run_daily_pipeline(
+            injury_overrides=body.injury_overrides if body.injury_overrides else None,
+        )
+        _last_analysis = analysis
+        return analysis
+    except Exception as e:
+        logger.error(f"Pipeline with overrides failed: {e}")
         return DailyAnalysis(
             date=date.today(),
             games_count=0,
@@ -137,7 +172,7 @@ async def get_ai_prompt() -> dict:
         dq_parts.append(f"ratings={dq.ratings_freshness}")
         dq_parts.append(f"injuries={dq.injury_freshness}")
         dq_parts.append(f"prices={dq.price_freshness}")
-        break  # Just show first game's quality (they share the same fetch)
+        break
     prompt_lines.append(f"DATA QUALITY: {', '.join(dq_parts) if dq_parts else 'N/A'}")
 
     return {"prompt": "\n".join(prompt_lines), "format": "text", "date": str(analysis.date)}
@@ -146,14 +181,12 @@ async def get_ai_prompt() -> dict:
 @router.get("/{game_id}", response_model=GameAnalysis)
 async def get_game_detail(game_id: str) -> GameAnalysis:
     """Get detailed analysis for a single game."""
-    # Try cached analysis first
     global _last_analysis
     if _last_analysis:
         for game in _last_analysis.games:
             if game.game_id == game_id:
                 return game
 
-    # If not cached, run pipeline
     analysis = await run_daily_pipeline()
     _last_analysis = analysis
     for game in analysis.games:

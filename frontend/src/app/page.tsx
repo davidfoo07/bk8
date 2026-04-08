@@ -20,21 +20,27 @@ export default function Dashboard() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const loadData = useCallback(async (isRefresh = false) => {
+  // Injury overrides: { "Victor Wembanyama": "FULL", "Stephon Castle": "OFF" }
+  const [injuryOverrides, setInjuryOverrides] = useState<Record<string, string>>({});
+
+  const loadData = useCallback(async (isRefresh = false, overrides?: Record<string, string>) => {
     if (isRefresh) {
       setRefreshing(true);
     } else {
       setLoading(true);
     }
     try {
-      const result = await api.getTodaysGames();
+      const effectiveOverrides = overrides ?? injuryOverrides;
+      const hasOverrides = Object.keys(effectiveOverrides).length > 0;
+      const result = hasOverrides
+        ? await api.getTodaysGamesWithOverrides(effectiveOverrides)
+        : await api.getTodaysGames();
       setData(result);
       setError(null);
       setLastUpdated(new Date());
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to load data";
       setError(message);
-      // Don't clear existing data on refresh failure
       if (!isRefresh) {
         setData(null);
       }
@@ -42,7 +48,7 @@ export default function Dashboard() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [injuryOverrides]);
 
   // Initial load + auto-refresh
   useEffect(() => {
@@ -56,7 +62,6 @@ export default function Dashboard() {
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      // Hit the force-refresh endpoint first
       await fetch(
         `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"}/games/refresh`,
         { method: "POST" }
@@ -64,8 +69,29 @@ export default function Dashboard() {
     } catch {
       // Ignore — we'll re-fetch anyway
     }
-    await loadData(true);
+    // Clear overrides on hard refresh
+    setInjuryOverrides({});
+    await loadData(true, {});
   };
+
+  /** Called from GameCard when user toggles a QUESTIONABLE player */
+  const handleInjuryToggle = useCallback(
+    (playerName: string, mode: "FULL" | "HALF" | "OFF") => {
+      setInjuryOverrides((prev) => {
+        const next = { ...prev };
+        if (mode === "HALF") {
+          // HALF is the default — remove override to restore default behavior
+          delete next[playerName];
+        } else {
+          next[playerName] = mode;
+        }
+        // Immediately re-fetch with new overrides
+        setTimeout(() => loadData(true, next), 0);
+        return next;
+      });
+    },
+    [loadData]
+  );
 
   const handleCopyFullSlate = async () => {
     try {
@@ -74,7 +100,6 @@ export default function Dashboard() {
       setAiPromptCopied(true);
       setTimeout(() => setAiPromptCopied(false), 2000);
     } catch {
-      // Fallback: generate from local data
       if (data) {
         const lines = data.games.map(
           (g) =>
@@ -92,7 +117,6 @@ export default function Dashboard() {
     }
   };
 
-  // Format time since last update
   const lastUpdatedStr = lastUpdated
     ? lastUpdated.toLocaleTimeString("en-US", {
         hour: "numeric",
@@ -115,7 +139,7 @@ export default function Dashboard() {
               Fetching live data from NBA API & Polymarket...
             </p>
             <p className="text-[#64748b] text-xs mt-1">
-              First load may take up to 60s (scanning 51K+ markets)
+              First load may take up to 60s
             </p>
           </div>
         )}
@@ -139,7 +163,6 @@ export default function Dashboard() {
         {/* Main content */}
         {data && (
           <>
-            {/* Top Edges Banner */}
             <TopEdges edges={data.top_edges} />
 
             {/* Controls bar */}
@@ -188,7 +211,12 @@ export default function Dashboard() {
             {data.games.length > 0 ? (
               <div className="space-y-4">
                 {data.games.map((game) => (
-                  <GameCard key={game.game_id} game={game} />
+                  <GameCard
+                    key={game.game_id}
+                    game={game}
+                    injuryOverrides={injuryOverrides}
+                    onInjuryToggle={handleInjuryToggle}
+                  />
                 ))}
               </div>
             ) : (
@@ -198,7 +226,6 @@ export default function Dashboard() {
         )}
       </main>
 
-      {/* Footer */}
       <footer className="border-t border-[#1e293b] mt-12 py-4 text-center text-xs text-[#64748b]">
         CourtEdge v0.1 — Lineup-adjusted NBA analytics for Polymarket
         {data && ` — ${data.date}`}
