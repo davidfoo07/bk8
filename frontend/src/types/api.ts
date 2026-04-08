@@ -39,6 +39,8 @@ export interface MarketEdge {
   line: number | null;
   polymarket_home_yes: number | null;
   polymarket_home_no: number | null;
+  home_label: string | null;
+  away_label: string | null;
   model_probability: number;
   edge: EdgeResult;
 }

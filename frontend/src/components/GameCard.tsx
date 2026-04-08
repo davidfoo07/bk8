@@ -19,6 +19,25 @@ interface GameCardProps {
   game: GameAnalysis;
 }
 
+/** Is the recommended side the "home" side of the market? */
+function isHomeSide(m: GameAnalysis["markets"][string]): boolean {
+  // home_label is set by the backend (e.g. "Nuggets", "Spurs", "Over")
+  // best_side now uses real names instead of YES/NO
+  if (m.home_label) return m.edge.best_side === m.home_label;
+  // Legacy fallback
+  return m.edge.best_side === "YES";
+}
+
+/** Get the price for the recommended side */
+function getBestPrice(m: GameAnalysis["markets"][string]): number {
+  return isHomeSide(m) ? (m.polymarket_home_yes || 0) : (m.polymarket_home_no || 0);
+}
+
+/** Get the EV for the recommended side */
+function getBestEv(m: GameAnalysis["markets"][string]): number {
+  return isHomeSide(m) ? m.edge.yes_ev : m.edge.no_ev;
+}
+
 export default function GameCard({ game }: GameCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -41,7 +60,7 @@ export default function GameCard({ game }: GameCardProps) {
       `EDGES:`,
       ...Object.entries(game.markets).map(
         ([type, m]) =>
-          `${type}: ${m.edge.best_side} @ ${formatPrice(m.edge.best_side === "YES" ? (m.polymarket_home_yes || 0) : (m.polymarket_home_no || 0))} | Model: ${formatPct(m.model_probability)} | Edge: ${formatEdge(m.edge.best_edge)} | ${m.edge.verdict}`
+          `${type}: ${m.edge.best_side} @ ${formatPrice(getBestPrice(m))} | Model: ${formatPct(m.model_probability)} | Edge: ${formatEdge(m.edge.best_edge)} | ${m.edge.verdict}`
       ),
     ];
     const success = await copyToClipboard(lines.join("\n"));
@@ -180,11 +199,7 @@ export default function GameCard({ game }: GameCardProps) {
                     <td className="py-2 pr-4 text-[#e2e8f0] capitalize">{type}</td>
                     <td className="py-2 pr-4 text-[#e2e8f0]">{m.edge.best_side}</td>
                     <td className="py-2 pr-4 text-right text-[#e2e8f0]">
-                      {formatPrice(
-                        m.edge.best_side === "YES"
-                          ? (m.polymarket_home_yes || 0)
-                          : (m.polymarket_home_no || 0)
-                      )}
+                      {formatPrice(getBestPrice(m))}
                     </td>
                     <td className="py-2 pr-4 text-right text-[#e2e8f0]">
                       {formatPct(m.model_probability)}
@@ -193,9 +208,7 @@ export default function GameCard({ game }: GameCardProps) {
                       {formatEdge(m.edge.best_edge)}
                     </td>
                     <td className="py-2 pr-4 text-right text-[#94a3b8]">
-                      {m.edge.best_side === "YES"
-                        ? `$${m.edge.yes_ev.toFixed(2)}`
-                        : `$${m.edge.no_ev.toFixed(2)}`}
+                      ${getBestEv(m).toFixed(2)}
                     </td>
                     <td className="py-2 pr-4 text-right text-[#94a3b8]">
                       {m.edge.suggested_bet_pct.toFixed(1)}%
