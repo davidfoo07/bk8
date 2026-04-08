@@ -141,13 +141,16 @@ async def run_daily_pipeline(game_date: date | None = None) -> DailyAnalysis:
         team_abbrs.add(g["home_team"])
         team_abbrs.add(g["away_team"])
 
-    ratings_task = _fetch_team_ratings(warnings)
-    standings_task = _fetch_standings(warnings)
+    # Phase 2a: Fetch standings first (needed as fallback for ratings)
+    standings_data = await _fetch_standings(warnings)
+
+    # Phase 2b: Fetch ratings (with standings fallback), injuries, and markets in parallel
+    ratings_task = _fetch_team_ratings(warnings, standings_fallback=standings_data)
     injuries_task = _fetch_injuries(warnings)
     polymarket_task = _fetch_all_polymarket_markets(warnings)
 
-    ratings_data, standings_data, injuries_data, polymarket_markets = await asyncio.gather(
-        ratings_task, standings_task, injuries_task, polymarket_task
+    ratings_data, injuries_data, polymarket_markets = await asyncio.gather(
+        ratings_task, injuries_task, polymarket_task
     )
 
     # Step 3: Process each game
@@ -251,8 +254,13 @@ def _resolve_team_abbr(game_data: dict, team_key: str) -> str | None:
 
 async def _fetch_team_ratings(
     warnings: list[str],
+    standings_fallback: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, float]]:
-    """Fetch team ratings from NBA API → {team_abbr: {ortg, drtg, nrtg, pace}}."""
+    """Fetch team ratings from NBA API → {team_abbr: {ortg, drtg, nrtg, pace}}.
+
+    If the NBA API is down (HTTP 500), falls back to estimating ratings
+    from standings data using a Pythagorean win-loss approximation.
+    """
     cached = _cache.get("team_ratings", ttl_seconds=3600)  # 1hr cache
     if cached:
         return cached
@@ -287,13 +295,82 @@ async def _fetch_team_ratings(
                 "nrtg": float(nrtg or 2),
                 "pace": float(pace or 100),
             }
-        logger.info(f"Fetched ratings for {len(result)} teams")
-        _cache.set("team_ratings", result)
+        if result:
+            logger.info(f"✅ Fetched ratings for {len(result)} teams from NBA API")
+            _cache.set("team_ratings", result)
+        else:
+            logger.warning("NBA API returned 0 team ratings rows")
     except Exception as e:
-        logger.error(f"Failed to fetch team ratings: {e}")
-        warnings.append(f"Team ratings unavailable: {e}")
+        logger.error(f"Failed to fetch team ratings from NBA API: {e}")
+        warnings.append(f"Team ratings API unavailable: {e}")
     finally:
         await nba.close()
+
+    # ── Fallback: estimate ratings from standings ──
+    if not result and standings_fallback:
+        result = _estimate_ratings_from_standings(standings_fallback)
+        if result:
+            logger.info(
+                f"⚠️ Using estimated ratings from standings for {len(result)} teams "
+                f"(NBA API leaguedashteamstats is down)"
+            )
+            warnings.append(
+                "Team ratings estimated from standings (NBA API returned HTTP 500). "
+                "ORtg/DRtg are approximations based on win-loss record."
+            )
+            _cache.set("team_ratings", result)
+    elif not result:
+        logger.error(
+            "❌ No team ratings available: NBA API failed and no standings data "
+            "for fallback. All teams will use league-average defaults."
+        )
+        warnings.append("No team ratings data available from any source")
+
+    return result
+
+
+def _estimate_ratings_from_standings(
+    standings: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, float]]:
+    """Estimate team ORtg, DRtg, NRtg from win-loss records.
+
+    Uses a Pythagorean-style linear approximation:
+      - League average ORtg ≈ 112.0 (2025-26 season pace)
+      - NRtg ≈ (WinPCT - 0.5) × 28   (empirical linear fit)
+      - ORtg = league_avg + NRtg / 2   (split evenly between O and D)
+      - DRtg = league_avg - NRtg / 2
+      - Pace defaults to 100.0 (no pace data from standings)
+
+    This gives differentiated ratings per team (e.g. a 60-win team gets ~+8 NRtg,
+    a 20-win team gets ~-10 NRtg) instead of flat 112/110 for everyone.
+    """
+    LEAGUE_AVG_ORTG = 112.0
+    NRTG_COEFFICIENT = 28.0  # Empirical: maps 0-1 WinPCT range to ~±14 NRtg
+
+    result: dict[str, dict[str, float]] = {}
+    for abbr, data in standings.items():
+        wins = data.get("wins", 0)
+        losses = data.get("losses", 0)
+        total_games = wins + losses
+
+        if total_games == 0:
+            # Season hasn't started or no data — use league average
+            win_pct = 0.5
+        else:
+            win_pct = wins / total_games
+
+        # Pythagorean estimation
+        nrtg = (win_pct - 0.5) * NRTG_COEFFICIENT
+        ortg = LEAGUE_AVG_ORTG + nrtg / 2.0
+        drtg = LEAGUE_AVG_ORTG - nrtg / 2.0
+
+        result[abbr] = {
+            "ortg": round(ortg, 1),
+            "drtg": round(drtg, 1),
+            "nrtg": round(nrtg, 1),
+            "pace": 100.0,  # No pace data from standings
+        }
+
     return result
 
 

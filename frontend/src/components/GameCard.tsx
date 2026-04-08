@@ -281,10 +281,10 @@ export default function GameCard({ game }: GameCardProps) {
 
           {/* Data Quality */}
           <div className="flex items-center gap-3 mt-3 text-xs text-[#64748b]">
-            <span>Ratings: {game.data_quality.ratings_freshness}</span>
-            <span>Injuries: {game.data_quality.injury_freshness}</span>
-            <span>Prices: {game.data_quality.price_freshness}</span>
-            {game.data_quality.warnings.length > 0 && (
+            <span>Ratings: {game.data_quality?.ratings_freshness ?? "N/A"}</span>
+            <span>Injuries: {game.data_quality?.injury_freshness ?? "N/A"}</span>
+            <span>Prices: {game.data_quality?.price_freshness ?? "N/A"}</span>
+            {(game.data_quality?.warnings?.length ?? 0) > 0 && (
               <span className="text-[#FFD600]">
                 {game.data_quality.warnings.length} warning(s)
               </span>

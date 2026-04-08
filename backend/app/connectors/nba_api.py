@@ -102,11 +102,17 @@ class NBAApiConnector(BaseConnector):
                 "SeasonType": "Regular Season",
             }
             data = await self.fetch("/teamestimatedmetrics", params=params)
-            headers = data["resultSets"][0]["headers"]
-            rows = data["resultSets"][0]["rowSet"]
-            result = [dict(zip(headers, row)) for row in rows]
-            logger.info("Got team ratings via teamestimatedmetrics fallback")
-            return result
+            # teamestimatedmetrics may use "resultSet" (singular) instead of "resultSets"
+            result_set = data.get("resultSets") or data.get("resultSet")
+            if isinstance(result_set, list):
+                result_set = result_set[0]
+            if result_set:
+                headers = result_set["headers"]
+                rows = result_set["rowSet"]
+                result = [dict(zip(headers, row)) for row in rows]
+                logger.info("Got team ratings via teamestimatedmetrics fallback")
+                return result
+            logger.warning("teamestimatedmetrics returned no result set")
         except Exception as e:
             logger.warning(f"teamestimatedmetrics also failed: {e}")
 
