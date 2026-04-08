@@ -45,10 +45,11 @@ htmlcov/
 .pytest_cache/
 
 # Node (frontend)
-frontend/node_modules/
+node_modules/
 frontend/.next/
 frontend/out/
 frontend/build/
+package-lock.json
 
 # Logs
 *.log
