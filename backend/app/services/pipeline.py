@@ -855,16 +855,18 @@ def _build_player_absences(
     """Build player absence list with real per-player impact from NBA stats.
 
     Three-state override for QUESTIONABLE players (user-controlled via frontend):
-      "FULL" → 100% miss weight (user knows they're sitting)
-      "HALF" → 50% miss weight (uncertain — default for QUESTIONABLE)
-      "OFF"  → 0% — excluded, user thinks they'll play
+      "FULL" = 100% miss weight (user knows they are sitting)
+      "HALF" = 50% miss weight (uncertain, default for QUESTIONABLE)
+      "OFF"  = 0%, excluded, user thinks they will play
 
-    OUT/DOUBTFUL always use 100%/75% — not overridable.
-
-    Impact formula:
-      nrtg_impact = -E_NET_RATING × (MIN/48) × 0.6 × miss_probability
+    Key fixes:
+      - Players under 10 min/game are filtered (too noisy from small samples)
+      - ORtg/DRtg impacts derived symmetrically from NRtg so losing a star
+        always makes the team WORSE (no paradoxical NRtg-goes-up scenarios)
+      - Results sorted by |impact| descending so diminishing returns is fair
     """
-    # Default miss probability by status
+    MIN_MINUTES_THRESHOLD = 10.0  # Ignore < 10 min/game (sample size noise)
+
     DEFAULT_MISS: dict[str, float] = {
         "OUT": 1.0,
         "DOUBTFUL": 0.75,
@@ -892,28 +894,40 @@ def _build_player_absences(
             miss_prob = DEFAULT_MISS.get(status, 0.0)
 
         if miss_prob <= 0:
-            continue  # PROBABLE or overridden OFF — skip
+            continue  # PROBABLE or overridden OFF
 
         # Look up real stats
         stats = pm.get(player_name)
 
         if stats:
             minutes = float(stats.get("MIN", 0) or 0)
-            e_off = float(stats.get("E_OFF_RATING", 112) or 112)
-            e_def = float(stats.get("E_DEF_RATING", 112) or 112)
             e_net = float(stats.get("E_NET_RATING", 0) or 0)
+
+            # Filter out low-minute players: their E_NET is just noise
+            # (e.g. Emanuel Miller 6.6 min with E_NET=-32 is meaningless)
+            if minutes < MIN_MINUTES_THRESHOLD:
+                logger.debug(
+                    f"  Skipping {player_name} ({status}) -- "
+                    f"only {minutes:.1f} min/game (noise)"
+                )
+                continue
 
             min_share = minutes / 48.0
             dampening = 0.6
-            league_avg_ortg = 112.0
-            league_avg_drtg = 112.0
 
-            ortg_impact = -(e_off - league_avg_ortg) * min_share * dampening * miss_prob
-            drtg_impact = (e_def - league_avg_drtg) * min_share * dampening * miss_prob
+            # Core impact: losing a +16 NRtg player hurts by ~6 NRtg
             nrtg_impact = -e_net * min_share * dampening * miss_prob
 
+            # Split NRtg impact symmetrically into ORtg and DRtg.
+            # This prevents paradoxes where NRtg goes UP when a star is out
+            # (which happened when we used separate E_OFF/E_DEF because
+            # defense could drop more than offense, making NRtg = ORtg-DRtg rise).
+            # With symmetric split: losing a good player always hurts NRtg.
+            ortg_impact = nrtg_impact / 2.0    # team offense worse (negative)
+            drtg_impact = -nrtg_impact / 2.0   # team defense worse (positive = higher DRtg)
+
             logger.debug(
-                f"  Injury impact: {player_name} ({status}, {miss_prob:.0%} miss) — "
+                f"  Injury impact: {player_name} ({status}, {miss_prob:.0%} miss) -- "
                 f"E_NET={e_net:+.1f}, MIN={minutes:.1f}, "
                 f"NRtg impact={nrtg_impact:+.2f}"
             )
@@ -923,7 +937,7 @@ def _build_player_absences(
             drtg_impact = 0.3 * miss_prob
             nrtg_impact = -0.8 * miss_prob
             logger.debug(
-                f"  Injury impact: {player_name} ({status}, {miss_prob:.0%} miss) — "
+                f"  Injury impact: {player_name} ({status}, {miss_prob:.0%} miss) -- "
                 f"no stats, using default"
             )
 
@@ -937,6 +951,10 @@ def _build_player_absences(
             nrtg_impact=round(nrtg_impact, 2),
             minutes_share=round(min_share, 3),
         ))
+
+    # Sort by absolute impact descending so the biggest star gets
+    # diminishing_returns factor=1.0 in the lineup model (not random ESPN order)
+    absences.sort(key=lambda a: abs(a.nrtg_impact), reverse=True)
     return absences
 
 
