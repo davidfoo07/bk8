@@ -26,7 +26,7 @@ class EdgeResult(BaseModel):
     no_edge: float
     yes_ev: float
     no_ev: float
-    best_side: str  # YES or NO
+    best_side: str  # YES or NO — or team name like "Nuggets"
     best_edge: float
     verdict: str  # STRONG BUY, BUY, LEAN, NO EDGE
     kelly_fraction: float = 0.0
@@ -39,5 +39,7 @@ class MarketEdge(BaseModel):
     line: float | None = None  # spread line or total line
     polymarket_home_yes: float | None = None
     polymarket_home_no: float | None = None
+    home_label: str | None = None  # e.g. "Nuggets" instead of "YES"
+    away_label: str | None = None  # e.g. "Grizzlies" instead of "NO"
     model_probability: float
     edge: EdgeResult

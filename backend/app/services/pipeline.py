@@ -15,6 +15,8 @@ import asyncio
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+import re
+
 from loguru import logger
 
 from app.analytics.edge_calculator import calculate_edge, calculate_game_edges
@@ -32,7 +34,6 @@ from app.schemas.team import InjurySchema, PlayerAbsence, ScheduleContext
 
 
 # ─── NBA Team ID ↔ Abbreviation maps ───────────────────────────────
-# stats.nba.com uses numeric TEAM_ID; we use 3-letter abbreviations.
 NBA_TEAM_ID_TO_ABBR: dict[int, str] = {
     1610612737: "ATL", 1610612738: "BOS", 1610612751: "BKN", 1610612766: "CHA",
     1610612741: "CHI", 1610612739: "CLE", 1610612742: "DAL", 1610612743: "DEN",
@@ -46,7 +47,6 @@ NBA_TEAM_ID_TO_ABBR: dict[int, str] = {
 
 NBA_ABBR_TO_TEAM_ID: dict[str, int] = {v: k for k, v in NBA_TEAM_ID_TO_ABBR.items()}
 
-# Full team names (for display)
 NBA_TEAM_NAMES: dict[str, str] = {
     "ATL": "Atlanta Hawks", "BOS": "Boston Celtics", "BKN": "Brooklyn Nets",
     "CHA": "Charlotte Hornets", "CHI": "Chicago Bulls", "CLE": "Cleveland Cavaliers",
@@ -60,7 +60,6 @@ NBA_TEAM_NAMES: dict[str, str] = {
     "TOR": "Toronto Raptors", "UTA": "Utah Jazz", "WAS": "Washington Wizards",
 }
 
-# NBA Tricode mapping (scoreboard API uses triCode)
 TRICODE_TO_ABBR: dict[str, str] = {
     "ATL": "ATL", "BOS": "BOS", "BKN": "BKN", "CHA": "CHA", "CHI": "CHI",
     "CLE": "CLE", "DAL": "DAL", "DEN": "DEN", "DET": "DET", "GSW": "GSW",
@@ -70,7 +69,6 @@ TRICODE_TO_ABBR: dict[str, str] = {
     "SAC": "SAC", "SAS": "SAS", "TOR": "TOR", "UTA": "UTA", "WAS": "WAS",
 }
 
-# Lineup model singleton
 _lineup_model = OnOffSplitModel()
 
 
@@ -103,14 +101,9 @@ _cache = PipelineCache()
 # ─── Main Pipeline ──────────────────────────────────────────────────
 
 async def run_daily_pipeline(game_date: date | None = None) -> DailyAnalysis:
-    """
-    Run the full data pipeline for today's games.
-    This is THE function that replaces SAMPLE_GAMES.
-    """
     if game_date is None:
         game_date = date.today()
 
-    # Check cache first (5 min TTL for full analysis)
     cache_key = f"daily_{game_date.isoformat()}"
     cached = _cache.get(cache_key, ttl_seconds=300)
     if cached is not None:
@@ -124,32 +117,22 @@ async def run_daily_pipeline(game_date: date | None = None) -> DailyAnalysis:
     games_raw = await _fetch_todays_games(game_date, warnings)
     if not games_raw:
         logger.warning("No games found for today. Returning empty analysis.")
-        result = DailyAnalysis(
-            date=game_date,
-            games_count=0,
-            games=[],
-            top_edges=[],
-        )
+        result = DailyAnalysis(date=game_date, games_count=0, games=[], top_edges=[])
         _cache.set(cache_key, result)
         return result
 
     logger.info(f"Found {len(games_raw)} games for {game_date}")
 
-    # Step 2: Fetch supporting data in parallel
-    team_abbrs = set()
-    for g in games_raw:
-        team_abbrs.add(g["home_team"])
-        team_abbrs.add(g["away_team"])
-
-    # Phase 2a: Fetch standings first (needed as fallback for ratings)
+    # Step 2: Fetch supporting data
+    # Phase 2a: Standings first (needed as fallback for ratings)
     standings_data = await _fetch_standings(warnings)
 
-    # Phase 2b: Fetch ratings (with standings fallback), injuries, and markets in parallel
+    # Phase 2b: Ratings + injuries + Polymarket in parallel
     ratings_task = _fetch_team_ratings(warnings, standings_fallback=standings_data)
     injuries_task = _fetch_injuries(warnings)
-    polymarket_task = _fetch_all_polymarket_markets(warnings)
+    polymarket_task = _fetch_all_polymarket_events(games_raw, game_date, warnings)
 
-    ratings_data, injuries_data, polymarket_markets = await asyncio.gather(
+    ratings_data, injuries_data, polymarket_events = await asyncio.gather(
         ratings_task, injuries_task, polymarket_task
     )
 
@@ -157,13 +140,18 @@ async def run_daily_pipeline(game_date: date | None = None) -> DailyAnalysis:
     game_analyses: list[GameAnalysis] = []
     for game_raw in games_raw:
         try:
+            away_abbr = game_raw["away_team"]
+            home_abbr = game_raw["home_team"]
+            event_key = f"{away_abbr}@{home_abbr}"
+            game_event = polymarket_events.get(event_key)
+
             analysis = await _process_single_game(
                 game_raw=game_raw,
                 game_date=game_date,
                 ratings_data=ratings_data,
                 standings_data=standings_data,
                 injuries_data=injuries_data,
-                polymarket_markets=polymarket_markets,
+                polymarket_event=game_event,
                 warnings=warnings,
             )
             game_analyses.append(analysis)
@@ -174,14 +162,12 @@ async def run_daily_pipeline(game_date: date | None = None) -> DailyAnalysis:
     # Step 4: Extract top edges
     top_edges = _extract_top_edges(game_analyses)
 
-    # Step 5: Assemble final response
     result = DailyAnalysis(
         date=game_date,
         games_count=len(game_analyses),
         games=game_analyses,
         top_edges=top_edges,
     )
-
     _cache.set(cache_key, result)
     logger.info(
         f"=== Pipeline complete: {len(game_analyses)} games, "
@@ -195,7 +181,6 @@ async def run_daily_pipeline(game_date: date | None = None) -> DailyAnalysis:
 async def _fetch_todays_games(
     game_date: date, warnings: list[str]
 ) -> list[dict[str, Any]]:
-    """Fetch and normalize today's game schedule from NBA API."""
     nba = NBAApiConnector()
     try:
         raw_games = await nba.get_todays_games(game_date)
@@ -207,7 +192,6 @@ async def _fetch_todays_games(
                 logger.warning(f"Could not resolve teams for game: {g}")
                 continue
 
-            # Parse tipoff time
             tipoff = None
             game_time_utc = g.get("gameTimeUTC") or g.get("gameEt") or g.get("gameDateTimeUtc")
             if game_time_utc:
@@ -237,10 +221,8 @@ async def _fetch_todays_games(
 
 
 def _resolve_team_abbr(game_data: dict, team_key: str) -> str | None:
-    """Extract team abbreviation from NBA scoreboard response."""
     team = game_data.get(team_key, {})
     if isinstance(team, dict):
-        # scoreboardv3 format: {"teamTricode": "BOS", "teamId": 1610612738, ...}
         tricode = team.get("teamTricode", "")
         if tricode and tricode in TRICODE_TO_ABBR:
             return TRICODE_TO_ABBR[tricode]
@@ -256,12 +238,7 @@ async def _fetch_team_ratings(
     warnings: list[str],
     standings_fallback: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, float]]:
-    """Fetch team ratings from NBA API → {team_abbr: {ortg, drtg, nrtg, pace}}.
-
-    If the NBA API is down (HTTP 500), falls back to estimating ratings
-    from standings data using a Pythagorean win-loss approximation.
-    """
-    cached = _cache.get("team_ratings", ttl_seconds=3600)  # 1hr cache
+    cached = _cache.get("team_ratings", ttl_seconds=3600)
     if cached:
         return cached
 
@@ -274,18 +251,14 @@ async def _fetch_team_ratings(
             abbr = NBA_TEAM_ID_TO_ABBR.get(team_id)
             if not abbr:
                 continue
-            # Handle both Advanced (OFF_RATING) and Base stats column names
             ortg = row.get("OFF_RATING") or row.get("E_OFF_RATING")
             drtg = row.get("DEF_RATING") or row.get("E_DEF_RATING")
             nrtg = row.get("NET_RATING") or row.get("E_NET_RATING")
             pace = row.get("PACE") or row.get("E_PACE")
 
-            # If Advanced columns not present, estimate from basic stats
             if ortg is None:
-                # Basic stats don't have ORtg directly. Use PTS + league avg.
                 pts = float(row.get("PTS", 110))
-                # Rough estimate: ORtg ≈ PTS * (100 / pace_est)
-                ortg = pts  # simplified fallback
+                ortg = pts
                 drtg = float(row.get("OPP_PTS", 110)) if "OPP_PTS" in row else 110.0
                 nrtg = ortg - drtg
 
@@ -306,24 +279,15 @@ async def _fetch_team_ratings(
     finally:
         await nba.close()
 
-    # ── Fallback: estimate ratings from standings ──
+    # Fallback: estimate from standings
     if not result and standings_fallback:
         result = _estimate_ratings_from_standings(standings_fallback)
         if result:
-            logger.info(
-                f"⚠️ Using estimated ratings from standings for {len(result)} teams "
-                f"(NBA API leaguedashteamstats is down)"
-            )
-            warnings.append(
-                "Team ratings estimated from standings (NBA API returned HTTP 500). "
-                "ORtg/DRtg are approximations based on win-loss record."
-            )
+            logger.info(f"⚠️ Using estimated ratings from standings for {len(result)} teams")
+            warnings.append("Team ratings estimated from standings (NBA API returned HTTP 500).")
             _cache.set("team_ratings", result)
     elif not result:
-        logger.error(
-            "❌ No team ratings available: NBA API failed and no standings data "
-            "for fallback. All teams will use league-average defaults."
-        )
+        logger.error("❌ No team ratings available from any source.")
         warnings.append("No team ratings data available from any source")
 
     return result
@@ -332,34 +296,16 @@ async def _fetch_team_ratings(
 def _estimate_ratings_from_standings(
     standings: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, float]]:
-    """Estimate team ORtg, DRtg, NRtg from win-loss records.
-
-    Uses a Pythagorean-style linear approximation:
-      - League average ORtg ≈ 112.0 (2025-26 season pace)
-      - NRtg ≈ (WinPCT - 0.5) × 28   (empirical linear fit)
-      - ORtg = league_avg + NRtg / 2   (split evenly between O and D)
-      - DRtg = league_avg - NRtg / 2
-      - Pace defaults to 100.0 (no pace data from standings)
-
-    This gives differentiated ratings per team (e.g. a 60-win team gets ~+8 NRtg,
-    a 20-win team gets ~-10 NRtg) instead of flat 112/110 for everyone.
-    """
     LEAGUE_AVG_ORTG = 112.0
-    NRTG_COEFFICIENT = 28.0  # Empirical: maps 0-1 WinPCT range to ~±14 NRtg
+    NRTG_COEFFICIENT = 28.0
 
     result: dict[str, dict[str, float]] = {}
     for abbr, data in standings.items():
         wins = data.get("wins", 0)
         losses = data.get("losses", 0)
         total_games = wins + losses
+        win_pct = wins / total_games if total_games > 0 else 0.5
 
-        if total_games == 0:
-            # Season hasn't started or no data — use league average
-            win_pct = 0.5
-        else:
-            win_pct = wins / total_games
-
-        # Pythagorean estimation
         nrtg = (win_pct - 0.5) * NRTG_COEFFICIENT
         ortg = LEAGUE_AVG_ORTG + nrtg / 2.0
         drtg = LEAGUE_AVG_ORTG - nrtg / 2.0
@@ -368,16 +314,12 @@ def _estimate_ratings_from_standings(
             "ortg": round(ortg, 1),
             "drtg": round(drtg, 1),
             "nrtg": round(nrtg, 1),
-            "pace": 100.0,  # No pace data from standings
+            "pace": 100.0,
         }
-
     return result
 
 
-async def _fetch_standings(
-    warnings: list[str],
-) -> dict[str, dict[str, Any]]:
-    """Fetch standings → {team_abbr: {wins, losses, seed, clinch, ...}}."""
+async def _fetch_standings(warnings: list[str]) -> dict[str, dict[str, Any]]:
     cached = _cache.get("standings", ttl_seconds=3600)
     if cached:
         return cached
@@ -387,34 +329,28 @@ async def _fetch_standings(
     try:
         raw = await nba.get_standings()
         for row in raw:
-            # leaguestandingsv3 returns various column names
             team_id = row.get("TeamID")
             abbr = NBA_TEAM_ID_TO_ABBR.get(team_id)
             if not abbr:
-                # Try matching by name/city
                 continue
             wins = int(row.get("WINS", row.get("W", 0)))
             losses = int(row.get("LOSSES", row.get("L", 0)))
             seed = int(row.get("PlayoffRank", row.get("SEED", row.get("ConferenceRank", 15))))
             clinch = row.get("ClinchIndicator", row.get("ClinchedPlayoffs", ""))
 
-            # Map clinch indicator
             clinch_status = "NONE"
             if clinch:
-                clinch_lower = str(clinch).lower()
-                if "1" in clinch_lower or "z" in clinch_lower:
+                cl = str(clinch).lower()
+                if "1" in cl or "z" in cl:
                     clinch_status = "CLINCHED_1_SEED"
-                elif "x" in clinch_lower or "playoff" in clinch_lower:
+                elif "x" in cl or "playoff" in cl:
                     clinch_status = "CLINCHED_PLAYOFF"
-                elif "e" in clinch_lower or "elim" in clinch_lower:
+                elif "e" in cl or "elim" in cl:
                     clinch_status = "ELIMINATED"
 
             result[abbr] = {
-                "wins": wins,
-                "losses": losses,
-                "record": f"{wins}-{losses}",
-                "seed": seed,
-                "clinch_status": clinch_status,
+                "wins": wins, "losses": losses, "record": f"{wins}-{losses}",
+                "seed": seed, "clinch_status": clinch_status,
                 "games_back": float(row.get("GB", row.get("ConferenceGamesBack", 0)) or 0),
             }
         logger.info(f"Fetched standings for {len(result)} teams")
@@ -427,11 +363,8 @@ async def _fetch_standings(
     return result
 
 
-async def _fetch_injuries(
-    warnings: list[str],
-) -> dict[str, list[dict[str, Any]]]:
-    """Fetch injuries → {team_abbr: [injury_dicts]}."""
-    cached = _cache.get("injuries", ttl_seconds=600)  # 10min
+async def _fetch_injuries(warnings: list[str]) -> dict[str, list[dict[str, Any]]]:
+    cached = _cache.get("injuries", ttl_seconds=600)
     if cached:
         return cached
 
@@ -453,26 +386,30 @@ async def _fetch_injuries(
     return result
 
 
-async def _fetch_all_polymarket_markets(
+async def _fetch_all_polymarket_events(
+    games_raw: list[dict[str, Any]],
+    game_date: date,
     warnings: list[str],
-) -> list[dict[str, Any]]:
-    """Fetch all active NBA Polymarket markets."""
-    cached = _cache.get("polymarket_markets", ttl_seconds=120)  # 2min
-    if cached:
-        return cached
-
+) -> dict[str, dict[str, Any] | None]:
     poly = PolymarketConnector()
-    result: list[dict[str, Any]] = []
     try:
-        result = await poly.get_nba_markets()
-        logger.info(f"Fetched {len(result)} Polymarket NBA markets")
-        _cache.set("polymarket_markets", result)
+        game_tuples = [(g["away_team"], g["home_team"]) for g in games_raw]
+        events = await poly.get_games_for_date(game_tuples, game_date)
+        found = sum(1 for v in events.values() if v is not None)
+        logger.info(f"Polymarket: fetched {found}/{len(game_tuples)} game events")
+
+        for key, event in events.items():
+            away, home = key.split("@")
+            cache_key = f"poly_event_{away}_{home}_{game_date.isoformat()}"
+            _cache.set(cache_key, event or {})
+
+        return events
     except Exception as e:
-        logger.error(f"Failed to fetch Polymarket markets: {e}")
-        warnings.append(f"Polymarket data unavailable: {e}")
+        logger.error(f"Failed to fetch Polymarket events: {e}")
+        warnings.append(f"Polymarket batch fetch failed: {e}")
+        return {}
     finally:
         await poly.close()
-    return result
 
 
 # ─── Step 3: Process Single Game ───────────────────────────────────
@@ -483,10 +420,9 @@ async def _process_single_game(
     ratings_data: dict[str, dict[str, float]],
     standings_data: dict[str, dict[str, Any]],
     injuries_data: dict[str, list[dict[str, Any]]],
-    polymarket_markets: list[dict[str, Any]],
+    polymarket_event: dict[str, Any] | None,
     warnings: list[str],
 ) -> GameAnalysis:
-    """Process a single game through the full analytics pipeline."""
     home_abbr = game_raw["home_team"]
     away_abbr = game_raw["away_team"]
     game_id = game_raw["game_id"]
@@ -495,356 +431,394 @@ async def _process_single_game(
 
     logger.info(f"Processing {away_abbr} @ {home_abbr}")
 
-    # ── Get team ratings ──
+    # Team ratings
     home_ratings = ratings_data.get(home_abbr, {"ortg": 112.0, "drtg": 110.0, "nrtg": 2.0, "pace": 100.0})
     away_ratings = ratings_data.get(away_abbr, {"ortg": 112.0, "drtg": 110.0, "nrtg": 2.0, "pace": 100.0})
 
-    # ── Get standings ──
+    # Standings
     home_standings = standings_data.get(home_abbr, {"record": "0-0", "seed": 15, "clinch_status": "NONE", "wins": 0, "losses": 0})
     away_standings = standings_data.get(away_abbr, {"record": "0-0", "seed": 15, "clinch_status": "NONE", "wins": 0, "losses": 0})
 
-    # ── Get injuries ──
+    # Injuries
     home_injuries_raw = injuries_data.get(home_abbr, [])
     away_injuries_raw = injuries_data.get(away_abbr, [])
 
-    # ── Build player absences with impact ──
+    # Player absences
     home_absences = _build_player_absences(home_injuries_raw)
     away_absences = _build_player_absences(away_injuries_raw)
 
-    # ── Lineup-adjusted ratings ──
+    # Lineup-adjusted ratings
     home_adj = _lineup_model.calculate_adjusted_ratings(
-        team_id=home_abbr,
-        season_ortg=home_ratings["ortg"],
-        season_drtg=home_ratings["drtg"],
-        missing_players=home_absences,
+        team_id=home_abbr, season_ortg=home_ratings["ortg"],
+        season_drtg=home_ratings["drtg"], missing_players=home_absences,
     )
     away_adj = _lineup_model.calculate_adjusted_ratings(
-        team_id=away_abbr,
-        season_ortg=away_ratings["ortg"],
-        season_drtg=away_ratings["drtg"],
-        missing_players=away_absences,
+        team_id=away_abbr, season_ortg=away_ratings["ortg"],
+        season_drtg=away_ratings["drtg"], missing_players=away_absences,
     )
 
-    # ── Schedule context ──
+    # Schedule context
     home_schedule = ScheduleContext(home_court=True)
     away_schedule = ScheduleContext(home_court=False)
 
     home_sched_mod = calculate_schedule_modifier(
-        is_b2b=home_schedule.is_b2b,
-        rest_days=home_schedule.rest_days,
+        is_b2b=home_schedule.is_b2b, rest_days=home_schedule.rest_days,
         road_trip_game=home_schedule.road_trip_game,
     )
     away_sched_mod = calculate_schedule_modifier(
-        is_b2b=away_schedule.is_b2b,
-        rest_days=away_schedule.rest_days,
+        is_b2b=away_schedule.is_b2b, rest_days=away_schedule.rest_days,
         road_trip_game=away_schedule.road_trip_game,
     )
 
-    # ── Motivation ──
+    # Motivation
     games_remaining = 82 - (home_standings.get("wins", 0) + home_standings.get("losses", 0))
     home_motivation = determine_motivation(
-        team=home_abbr,
-        record=home_standings.get("record", "0-0"),
+        team=home_abbr, record=home_standings.get("record", "0-0"),
         conference_seed=home_standings.get("seed", 15),
         clinch_status=home_standings.get("clinch_status", "NONE"),
         games_remaining=max(0, games_remaining),
     )
     away_games_remaining = 82 - (away_standings.get("wins", 0) + away_standings.get("losses", 0))
     away_motivation = determine_motivation(
-        team=away_abbr,
-        record=away_standings.get("record", "0-0"),
+        team=away_abbr, record=away_standings.get("record", "0-0"),
         conference_seed=away_standings.get("seed", 15),
         clinch_status=away_standings.get("clinch_status", "NONE"),
         games_remaining=max(0, away_games_remaining),
     )
 
-    # ── Prediction model ──
-    # Find Polymarket prices for this game
-    poly_prices = _find_polymarket_prices(
-        away_abbr, home_abbr, game_date, polymarket_markets
-    )
+    # Polymarket prices
+    poly_prices = _find_polymarket_prices(away_abbr, home_abbr, game_date, polymarket_event)
 
+    # Prediction model
     prediction = predict_game(
-        home_adj_nrtg=home_adj.adjusted_nrtg,
-        away_adj_nrtg=away_adj.adjusted_nrtg,
-        home_adj_ortg=home_adj.adjusted_ortg,
-        home_adj_drtg=home_adj.adjusted_drtg,
-        away_adj_ortg=away_adj.adjusted_ortg,
-        away_adj_drtg=away_adj.adjusted_drtg,
-        home_schedule_mod=home_sched_mod,
-        away_schedule_mod=away_sched_mod,
+        home_adj_nrtg=home_adj.adjusted_nrtg, away_adj_nrtg=away_adj.adjusted_nrtg,
+        home_adj_ortg=home_adj.adjusted_ortg, home_adj_drtg=home_adj.adjusted_drtg,
+        away_adj_ortg=away_adj.adjusted_ortg, away_adj_drtg=away_adj.adjusted_drtg,
+        home_schedule_mod=home_sched_mod, away_schedule_mod=away_sched_mod,
         spread_line=poly_prices.get("spread_line"),
         total_line=poly_prices.get("total_line"),
     )
 
-    # ── Edge calculation ──
+    # Team nicknames for labels
+    home_nick = _get_team_nickname(home_abbr).title()  # "Nuggets"
+    away_nick = _get_team_nickname(away_abbr).title()  # "Grizzlies"
+
+    # Edge calculation with real team names
     markets: dict[str, MarketEdge] = {}
 
     ml_price = poly_prices.get("moneyline_home_yes")
     if ml_price is not None:
         ml_edge = calculate_edge(prediction.home_win_prob, ml_price)
+        # Replace YES/NO with team names in the edge result
+        ml_edge_named = EdgeResult(
+            yes_edge=ml_edge.yes_edge, no_edge=ml_edge.no_edge,
+            yes_ev=ml_edge.yes_ev, no_ev=ml_edge.no_ev,
+            best_side=home_nick if ml_edge.best_side == "YES" else away_nick,
+            best_edge=ml_edge.best_edge, verdict=ml_edge.verdict,
+            kelly_fraction=ml_edge.kelly_fraction,
+            suggested_bet_pct=ml_edge.suggested_bet_pct,
+        )
         markets["moneyline"] = MarketEdge(
             market_type="moneyline",
             polymarket_home_yes=ml_price,
-            polymarket_home_no=round(1.0 - ml_price, 3) if ml_price else None,
+            polymarket_home_no=round(1.0 - ml_price, 3),
+            home_label=home_nick,
+            away_label=away_nick,
             model_probability=prediction.home_win_prob,
-            edge=ml_edge,
+            edge=ml_edge_named,
         )
 
     spread_price = poly_prices.get("spread_home_yes")
     if spread_price is not None:
-        # Use spread cover prob from prediction (default 0.5 if no line)
-        spread_cover_prob = prediction.home_win_prob  # simplified for v1
+        spread_cover_prob = prediction.home_win_prob
         spread_edge = calculate_edge(spread_cover_prob, spread_price)
+        spread_edge_named = EdgeResult(
+            yes_edge=spread_edge.yes_edge, no_edge=spread_edge.no_edge,
+            yes_ev=spread_edge.yes_ev, no_ev=spread_edge.no_ev,
+            best_side=home_nick if spread_edge.best_side == "YES" else away_nick,
+            best_edge=spread_edge.best_edge, verdict=spread_edge.verdict,
+            kelly_fraction=spread_edge.kelly_fraction,
+            suggested_bet_pct=spread_edge.suggested_bet_pct,
+        )
         markets["spread"] = MarketEdge(
             market_type="spread",
             line=poly_prices.get("spread_line"),
             polymarket_home_yes=spread_price,
-            polymarket_home_no=round(1.0 - spread_price, 3) if spread_price else None,
+            polymarket_home_no=round(1.0 - spread_price, 3),
+            home_label=home_nick,
+            away_label=away_nick,
             model_probability=spread_cover_prob,
-            edge=spread_edge,
+            edge=spread_edge_named,
         )
 
     total_price = poly_prices.get("total_over_yes")
     if total_price is not None:
-        over_prob = 0.5  # Default; will improve when we have total line
+        over_prob = 0.5
         total_edge = calculate_edge(over_prob, total_price)
+        total_edge_named = EdgeResult(
+            yes_edge=total_edge.yes_edge, no_edge=total_edge.no_edge,
+            yes_ev=total_edge.yes_ev, no_ev=total_edge.no_ev,
+            best_side="Over" if total_edge.best_side == "YES" else "Under",
+            best_edge=total_edge.best_edge, verdict=total_edge.verdict,
+            kelly_fraction=total_edge.kelly_fraction,
+            suggested_bet_pct=total_edge.suggested_bet_pct,
+        )
         markets["total"] = MarketEdge(
             market_type="total",
             line=poly_prices.get("total_line"),
             polymarket_home_yes=total_price,
-            polymarket_home_no=round(1.0 - total_price, 3) if total_price else None,
+            polymarket_home_no=round(1.0 - total_price, 3),
+            home_label="Over",
+            away_label="Under",
             model_probability=over_prob,
-            edge=total_edge,
+            edge=total_edge_named,
         )
 
-    # ── Build injury schemas for display ──
+    # Injury schemas
     home_injury_schemas = [
         InjurySchema(
-            player_name=inj.get("player_name", "Unknown"),
-            player_id=inj.get("player_id", ""),
-            team=home_abbr,
-            status=inj.get("status", "OUT"),
-            reason=inj.get("reason"),
-            source=inj.get("source", "NBA"),
-            impact_rating=_rate_impact(inj),
+            player_name=inj.get("player_name", "Unknown"), player_id=inj.get("player_id", ""),
+            team=home_abbr, status=inj.get("status", "OUT"), reason=inj.get("reason"),
+            source=inj.get("source", "NBA"), impact_rating=_rate_impact(inj),
         )
         for inj in home_injuries_raw
     ]
     away_injury_schemas = [
         InjurySchema(
-            player_name=inj.get("player_name", "Unknown"),
-            player_id=inj.get("player_id", ""),
-            team=away_abbr,
-            status=inj.get("status", "OUT"),
-            reason=inj.get("reason"),
-            source=inj.get("source", "NBA"),
-            impact_rating=_rate_impact(inj),
+            player_name=inj.get("player_name", "Unknown"), player_id=inj.get("player_id", ""),
+            team=away_abbr, status=inj.get("status", "OUT"), reason=inj.get("reason"),
+            source=inj.get("source", "NBA"), impact_rating=_rate_impact(inj),
         )
         for inj in away_injuries_raw
     ]
 
-    # ── Tipoff in SGT (UTC+8) ──
-    tipoff_sgt = None
-    if tipoff:
-        tipoff_sgt = tipoff + timedelta(hours=8)
+    # Tipoff SGT
+    tipoff_sgt = tipoff + timedelta(hours=8) if tipoff else None
 
-    # ── Data quality ──
+    # Data quality
     data_quality = DataQuality(
         ratings_freshness="FRESH" if ratings_data else "MISSING",
         injury_freshness="FRESH" if injuries_data else "MISSING",
         price_freshness="FRESH" if poly_prices else "MISSING",
         cross_source_validated=bool(ratings_data and standings_data),
-        warnings=warnings[:5],  # Cap warnings
+        warnings=warnings[:5],
     )
 
-    # ── Assemble ──
     return GameAnalysis(
-        game_id=game_id,
-        tipoff=tipoff,
-        tipoff_sgt=tipoff_sgt,
-        venue=venue,
+        game_id=game_id, tipoff=tipoff, tipoff_sgt=tipoff_sgt, venue=venue,
         home=TeamGameData(
-            team=home_abbr,
-            full_name=NBA_TEAM_NAMES.get(home_abbr, home_abbr),
-            record=home_standings.get("record", ""),
-            seed=home_standings.get("seed"),
+            team=home_abbr, full_name=NBA_TEAM_NAMES.get(home_abbr, home_abbr),
+            record=home_standings.get("record", ""), seed=home_standings.get("seed"),
             motivation=home_motivation.motivation_flag,
-            season_ortg=home_ratings["ortg"],
-            season_drtg=home_ratings["drtg"],
+            season_ortg=home_ratings["ortg"], season_drtg=home_ratings["drtg"],
             season_nrtg=home_ratings["nrtg"],
-            adjusted_ortg=home_adj.adjusted_ortg,
-            adjusted_drtg=home_adj.adjusted_drtg,
-            adjusted_nrtg=home_adj.adjusted_nrtg,
-            nrtg_delta=home_adj.nrtg_delta,
-            injuries=home_injury_schemas,
-            schedule=home_schedule,
+            adjusted_ortg=home_adj.adjusted_ortg, adjusted_drtg=home_adj.adjusted_drtg,
+            adjusted_nrtg=home_adj.adjusted_nrtg, nrtg_delta=home_adj.nrtg_delta,
+            injuries=home_injury_schemas, schedule=home_schedule,
         ),
         away=TeamGameData(
-            team=away_abbr,
-            full_name=NBA_TEAM_NAMES.get(away_abbr, away_abbr),
-            record=away_standings.get("record", ""),
-            seed=away_standings.get("seed"),
+            team=away_abbr, full_name=NBA_TEAM_NAMES.get(away_abbr, away_abbr),
+            record=away_standings.get("record", ""), seed=away_standings.get("seed"),
             motivation=away_motivation.motivation_flag,
-            season_ortg=away_ratings["ortg"],
-            season_drtg=away_ratings["drtg"],
+            season_ortg=away_ratings["ortg"], season_drtg=away_ratings["drtg"],
             season_nrtg=away_ratings["nrtg"],
-            adjusted_ortg=away_adj.adjusted_ortg,
-            adjusted_drtg=away_adj.adjusted_drtg,
-            adjusted_nrtg=away_adj.adjusted_nrtg,
-            nrtg_delta=away_adj.nrtg_delta,
-            injuries=away_injury_schemas,
-            schedule=away_schedule,
+            adjusted_ortg=away_adj.adjusted_ortg, adjusted_drtg=away_adj.adjusted_drtg,
+            adjusted_nrtg=away_adj.adjusted_nrtg, nrtg_delta=away_adj.nrtg_delta,
+            injuries=away_injury_schemas, schedule=away_schedule,
         ),
-        model=prediction,
-        markets=markets,
-        data_quality=data_quality,
+        model=prediction, markets=markets, data_quality=data_quality,
     )
 
 
 # ─── Polymarket Price Matching ──────────────────────────────────────
 
+def _get_team_nickname(abbr: str) -> str:
+    """Return team nickname in lowercase. e.g. 'DEN' → 'nuggets'."""
+    full = NBA_TEAM_NAMES.get(abbr, "")
+    if full:
+        return full.split()[-1].lower()
+    return abbr.lower()
+
+
 def _find_polymarket_prices(
     away_abbr: str,
     home_abbr: str,
     game_date: date,
-    all_markets: list[dict[str, Any]],
+    event: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """
-    Find Polymarket prices for a specific game.
-    Slug convention: contains team abbreviations + date.
-    Returns dict with moneyline_home_yes, spread_home_yes, spread_line, etc.
-    """
+    """Parse Polymarket event into moneyline / spread / total prices."""
     prices: dict[str, Any] = {}
-    away_lower = away_abbr.lower()
-    home_lower = home_abbr.lower()
-    date_str = game_date.strftime("%Y-%m-%d")
 
-    # Also search with team city names for fuzzy matching
-    away_names = _team_search_terms(away_abbr)
-    home_names = _team_search_terms(home_abbr)
+    if not event or not isinstance(event, dict):
+        logger.warning(f"No Polymarket event for {away_abbr}@{home_abbr}")
+        return prices
 
-    for market in all_markets:
-        slug = (market.get("slug") or "").lower()
-        question = (market.get("question") or "").lower()
-        search_text = f"{slug} {question}"
+    markets = event.get("markets") or []
+    if not markets:
+        logger.warning(f"Polymarket event has 0 markets for {away_abbr}@{home_abbr}")
+        return prices
 
-        # Match: slug or question must contain both teams
-        has_away = any(t in search_text for t in away_names)
-        has_home = any(t in search_text for t in home_names)
-        has_date = date_str in search_text
+    home_nick = _get_team_nickname(home_abbr)
+    away_nick = _get_team_nickname(away_abbr)
 
-        if not (has_away and has_home):
-            continue
+    moneyline_market = None
+    spread_candidates: list[dict[str, Any]] = []
+    total_candidates: list[dict[str, Any]] = []
 
-        # Parse prices
-        parsed = PolymarketConnector.parse_market_prices(market)
-        if not parsed:
-            continue
+    for mkt in markets:
+        question = (mkt.get("question") or "").strip()
+        q_lower = question.lower()
 
-        # Determine market type from slug/question
-        slug_q = f"{slug} {question}"
-        if any(kw in slug_q for kw in ["spread", "cover", "point"]):
-            # Spread market
-            home_outcome = _find_outcome_for_team(parsed, home_abbr, home_names)
-            if home_outcome is not None:
-                prices["spread_home_yes"] = home_outcome
-                # Try to extract spread line from question
-                line = _extract_line_from_text(question)
+        # Skip first-half (1H), quarter (1Q/2Q), and player prop markets
+        is_partial = any(tag in q_lower for tag in ["1h ", "2h ", "1q ", "2q ", "3q ", "4q ", "1h:", "2h:"])
+
+        if "spread" in q_lower:
+            if not is_partial:
+                spread_candidates.append(mkt)
+        elif "o/u" in q_lower or "over/under" in q_lower:
+            # Only full-game totals, not player props or half totals
+            # Game totals contain both team nicknames OR "vs." in the question
+            has_both_teams = home_nick in q_lower and away_nick in q_lower
+            has_vs = "vs." in q_lower or "vs " in q_lower
+            if (has_both_teams or has_vs) and not is_partial:
+                total_candidates.append(mkt)
+        elif "vs." in q_lower or "vs " in q_lower:
+            if "spread" not in q_lower and "o/u" not in q_lower:
+                moneyline_market = mkt
+        elif home_nick in q_lower and away_nick in q_lower:
+            if "spread" not in q_lower and "o/u" not in q_lower:
+                moneyline_market = mkt
+
+    # ── Moneyline ──
+    if moneyline_market:
+        parsed = PolymarketConnector.parse_market_prices(moneyline_market)
+        home_price = _match_outcome_price(parsed, home_nick)
+        away_price = _match_outcome_price(parsed, away_nick)
+        if home_price is not None:
+            prices["moneyline_home_yes"] = home_price
+            prices["moneyline_home_no"] = round(1.0 - home_price, 4)
+            logger.debug(f"  ML: {home_abbr}=${home_price:.3f}, {away_abbr}=${away_price or '?'}")
+
+    # ── Spread ──
+    if spread_candidates:
+        best_spread = _pick_best_spread(spread_candidates)
+        if best_spread:
+            parsed = PolymarketConnector.parse_market_prices(best_spread)
+            question = best_spread.get("question", "")
+            line = _extract_spread_line(question)
+            home_price = _match_outcome_price(parsed, home_nick)
+            if home_price is not None:
+                prices["spread_home_yes"] = home_price
                 if line is not None:
-                    prices["spread_line"] = line
-        elif any(kw in slug_q for kw in ["over", "under", "total", "points"]):
-            # Total market
-            over_price = parsed.get("Over") or parsed.get("Yes")
+                    prices["spread_line"] = _orient_spread_line(question, line, home_nick)
+                logger.debug(f"  Spread: {question} → home=${home_price:.3f}, line={prices.get('spread_line')}")
+
+    # ── Total (Over/Under) — game totals only ──
+    if total_candidates:
+        best_total = _pick_best_total(total_candidates)
+        if best_total:
+            parsed = PolymarketConnector.parse_market_prices(best_total)
+            question = best_total.get("question", "")
+            line = _extract_total_line(question)
+            over_price = parsed.get("Over")
             if over_price is not None:
                 prices["total_over_yes"] = float(over_price)
-            line = _extract_line_from_text(question)
+                prices["total_under_yes"] = round(1.0 - float(over_price), 4)
             if line is not None:
                 prices["total_line"] = line
-        else:
-            # Default: moneyline
-            home_outcome = _find_outcome_for_team(parsed, home_abbr, home_names)
-            if home_outcome is not None:
-                prices["moneyline_home_yes"] = home_outcome
+            logger.debug(f"  Total: {question} → over=${prices.get('total_over_yes')}, line={prices.get('total_line')}")
 
     if prices:
-        logger.info(f"Found Polymarket prices for {away_abbr}@{home_abbr}: {prices}")
+        logger.info(f"Polymarket prices for {away_abbr}@{home_abbr}: {prices}")
     else:
-        logger.warning(f"No Polymarket markets found for {away_abbr}@{home_abbr} on {date_str}")
+        logger.warning(f"No Polymarket markets matched for {away_abbr}@{home_abbr} (event had {len(markets)} markets)")
 
     return prices
 
 
-def _team_search_terms(abbr: str) -> list[str]:
-    """Get lowercase search terms for a team."""
-    full_name = NBA_TEAM_NAMES.get(abbr, "")
-    terms = [abbr.lower()]
-    if full_name:
-        parts = full_name.lower().split()
-        terms.extend(parts)  # e.g. ["los", "angeles", "lakers"]
-        if len(parts) >= 2:
-            terms.append(parts[-1])  # team nickname: "lakers"
-    return terms
-
-
-def _find_outcome_for_team(
-    parsed_prices: dict[str, float],
-    team_abbr: str,
-    team_names: list[str],
-) -> float | None:
-    """Find the price for a team in parsed market outcomes."""
-    for outcome, price in parsed_prices.items():
-        outcome_lower = outcome.lower()
-        if any(t in outcome_lower for t in team_names):
+def _match_outcome_price(parsed: dict[str, float], nickname: str) -> float | None:
+    nick_lower = nickname.lower()
+    for label, price in parsed.items():
+        if nick_lower in label.lower():
             return float(price)
-    # Check for Yes/No format
-    if "Yes" in parsed_prices:
-        return float(parsed_prices["Yes"])
     return None
 
 
-def _extract_line_from_text(text: str) -> float | None:
-    """Extract a numeric line from text like 'cover -6.5' or 'over 224.5'."""
-    import re
-    # Match patterns like -6.5, +8.5, 224.5
-    matches = re.findall(r'[+-]?\d+\.5', text)
-    if matches:
-        return float(matches[-1])
-    # Also try whole numbers
-    matches = re.findall(r'[+-]?\d{2,3}(?:\.\d)?', text)
-    if matches:
-        return float(matches[-1])
+def _extract_spread_line(question: str) -> float | None:
+    m = re.search(r'\(([+-]?\d+(?:\.\d+)?)\)', question)
+    if m:
+        return float(m.group(1))
+    m = re.search(r'([+-]\d+(?:\.\d+)?)', question)
+    if m:
+        return float(m.group(1))
     return None
+
+
+def _orient_spread_line(question: str, line: float, home_nick: str) -> float:
+    """Orient spread line from home team's perspective."""
+    q_lower = question.lower()
+    paren_idx = q_lower.find("(")
+    if paren_idx > 0:
+        pre_paren = q_lower[:paren_idx].strip()
+        if home_nick.lower() in pre_paren:
+            return line
+        else:
+            return -line
+    return line
+
+
+def _extract_total_line(question: str) -> float | None:
+    m = re.search(r'O/U\s+(\d+(?:\.\d+)?)', question, re.IGNORECASE)
+    if m:
+        return float(m.group(1))
+    m = re.search(r'Over/Under\s+(\d+(?:\.\d+)?)', question, re.IGNORECASE)
+    if m:
+        return float(m.group(1))
+    return None
+
+
+def _pick_best_spread(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Pick the spread with the SMALLEST absolute line (main line, not alt)."""
+    best: dict[str, Any] | None = None
+    best_abs_line = float("inf")
+    for mkt in candidates:
+        q = mkt.get("question", "")
+        line = _extract_spread_line(q)
+        if line is not None:
+            if abs(line) < best_abs_line:
+                best_abs_line = abs(line)
+                best = mkt
+        elif best is None:
+            best = mkt
+    return best
+
+
+def _pick_best_total(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Pick the first game total with a parseable O/U line."""
+    for mkt in candidates:
+        q = mkt.get("question", "")
+        if _extract_total_line(q) is not None:
+            return mkt
+    return candidates[0] if candidates else None
 
 
 # ─── Helper Functions ───────────────────────────────────────────────
 
 def _build_player_absences(injuries_raw: list[dict[str, Any]]) -> list[PlayerAbsence]:
-    """Convert raw injury data to PlayerAbsence objects with estimated impacts."""
     absences: list[PlayerAbsence] = []
     for inj in injuries_raw:
         status = inj.get("status", "OUT").upper()
-        # Only count OUT and DOUBTFUL as likely missing
         if status not in ("OUT", "DOUBTFUL"):
             continue
-
-        # Estimate impact based on status (will be refined with PBP on/off data)
-        # Default: assume medium-impact player
         absences.append(PlayerAbsence(
-            player_id=inj.get("player_id", "unknown"),
-            name=inj.get("player_name", "Unknown"),
-            status=status,
-            reason=inj.get("reason"),
-            ortg_impact=-1.5,   # Default: team loses 1.5 ORtg per missing player
-            drtg_impact=1.0,    # Default: team loses 1.0 DRtg per missing player
-            nrtg_impact=-2.5,   # Net impact
-            minutes_share=0.25,  # Assume ~25% minutes share
+            player_id=inj.get("player_id", "unknown"), name=inj.get("player_name", "Unknown"),
+            status=status, reason=inj.get("reason"),
+            ortg_impact=-1.5, drtg_impact=1.0, nrtg_impact=-2.5, minutes_share=0.25,
         ))
     return absences
 
 
 def _rate_impact(inj: dict[str, Any]) -> str:
-    """Rate injury impact as HIGH/MEDIUM/LOW based on available info."""
     status = inj.get("status", "").upper()
     if status in ("OUT", "DOUBTFUL"):
         return "HIGH"
@@ -854,39 +828,39 @@ def _rate_impact(inj: dict[str, Any]) -> str:
 
 
 def _extract_top_edges(games: list[GameAnalysis]) -> list[TopEdge]:
-    """Extract top edges from all games, sorted by edge size."""
     edges: list[TopEdge] = []
     for game in games:
         game_label = f"{game.away.team} @ {game.home.team}"
+        home_nick = _get_team_nickname(game.home.team).title()
+        away_nick = _get_team_nickname(game.away.team).title()
+
         for market_type, market in game.markets.items():
             if market.edge.verdict in ("STRONG BUY", "BUY"):
-                selection = (
-                    f"{game.home.team} {market_type}"
-                    if market.edge.best_side == "YES"
-                    else f"{game.away.team} {market_type}"
-                )
-                edges.append(
-                    TopEdge(
-                        game=game_label,
-                        market=market_type,
-                        selection=selection,
-                        price=(
-                            market.polymarket_home_yes
-                            if market.edge.best_side == "YES"
-                            else (market.polymarket_home_no or 0)
-                        ),
-                        model_prob=market.model_probability,
-                        edge=market.edge.best_edge,
-                        verdict=market.edge.verdict,
-                    )
-                )
+                # Use real team names for selection
+                if market_type == "total":
+                    selection = f"{market.edge.best_side} {market.line}" if market.line else market.edge.best_side
+                elif market.edge.best_side == home_nick:
+                    selection = f"{game.home.team} {market_type}"
+                else:
+                    selection = f"{game.away.team} {market_type}"
+
+                # Price for the recommended side
+                if market.edge.best_side in (home_nick, "Over"):
+                    price = market.polymarket_home_yes or 0
+                else:
+                    price = market.polymarket_home_no or 0
+
+                edges.append(TopEdge(
+                    game=game_label, market=market_type, selection=selection,
+                    price=price, model_prob=market.model_probability,
+                    edge=market.edge.best_edge, verdict=market.edge.verdict,
+                ))
     edges.sort(key=lambda e: e.edge, reverse=True)
     return edges
 
 
-# ─── Cache Management (for API use) ────────────────────────────────
+# ─── Cache Management ───────────────────────────────────────────────
 
 def clear_pipeline_cache() -> None:
-    """Clear all cached pipeline data. Call on manual refresh."""
     _cache.clear()
     logger.info("Pipeline cache cleared")

@@ -1,5 +1,9 @@
-"""Polymarket Gamma API connector for NBA market prices."""
+"""Polymarket Gamma API connector — event-based NBA market lookup."""
 
+from __future__ import annotations
+
+import asyncio
+import json
 from datetime import date
 from typing import Any
 
@@ -9,8 +13,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.connectors.base import BaseConnector
 
-
-# Team abbreviation to full name mapping for slug matching
+# Uppercase abbreviation → lowercase slug token used by Polymarket.
 TEAM_SLUG_MAP: dict[str, str] = {
     "ATL": "atl", "BOS": "bos", "BKN": "bkn", "CHA": "cha", "CHI": "chi",
     "CLE": "cle", "DAL": "dal", "DEN": "den", "DET": "det", "GSW": "gsw",
@@ -20,11 +23,9 @@ TEAM_SLUG_MAP: dict[str, str] = {
     "SAC": "sac", "SAS": "sas", "TOR": "tor", "UTA": "uta", "WAS": "was",
 }
 
-NBA_SERIES_ID = "10345"
-
 
 class PolymarketConnector(BaseConnector):
-    """Connector for Polymarket Gamma API."""
+    """Connector for Polymarket Gamma API using the /events endpoint."""
 
     def __init__(self) -> None:
         super().__init__(
@@ -67,101 +68,99 @@ class PolymarketConnector(BaseConnector):
     async def health_check(self) -> bool:
         """Check if Polymarket API is reachable."""
         try:
-            await self.fetch("/markets", params={"limit": "1"})
+            await self.fetch("/events", params={"slug": "nba", "limit": "1"})
             return True
         except Exception:
             return False
 
-    async def get_nba_markets(self, active: bool = True) -> list[dict[str, Any]]:
-        """Fetch all active NBA markets."""
-        params: dict[str, str] = {}
-        if active:
-            params["active"] = "true"
-        params["tag"] = "nba"
-        
-        all_markets: list[dict[str, Any]] = []
-        offset = 0
-        limit = 100
-        
-        while True:
-            params["limit"] = str(limit)
-            params["offset"] = str(offset)
-            data = await self.fetch("/markets", params=params)
-            
-            if not data:
-                break
-            
-            all_markets.extend(data)
-            
-            if len(data) < limit:
-                break
-            offset += limit
-        
-        return all_markets
-
-    async def get_market_by_slug(self, slug: str) -> dict[str, Any] | None:
-        """Fetch a specific market by its slug."""
-        try:
-            data = await self.fetch("/markets", params={"slug": slug})
-            if data and len(data) > 0:
-                return data[0]
-            return None
-        except Exception as e:
-            logger.warning(f"Failed to fetch market {slug}: {e}")
-            return None
-
-    async def get_game_markets(
+    async def get_game_event(
         self,
-        away_team: str,
-        home_team: str,
+        away_abbr: str,
+        home_abbr: str,
         game_date: date,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
+        """Fetch a single NBA game event by its slug.
+
+        Slug format: nba-{away_slug}-{home_slug}-{YYYY-MM-DD}
+        Returns the first matching event dict (with its ``markets`` list),
+        or ``None`` if not found.
         """
-        Fetch all markets for a specific NBA game.
-        Slug format: nba-{away}-{home}-{YYYY-MM-DD}
-        """
-        away_slug = TEAM_SLUG_MAP.get(away_team, away_team.lower())
-        home_slug = TEAM_SLUG_MAP.get(home_team, home_team.lower())
-        base_slug = f"nba-{away_slug}-{home_slug}-{game_date.strftime('%Y-%m-%d')}"
-        
-        markets: list[dict[str, Any]] = []
-        
-        # Try to get the game markets by searching
+        away_slug = TEAM_SLUG_MAP.get(away_abbr, away_abbr.lower())
+        home_slug = TEAM_SLUG_MAP.get(home_abbr, home_abbr.lower())
+        slug = f"nba-{away_slug}-{home_slug}-{game_date.strftime('%Y-%m-%d')}"
+
         try:
-            all_nba = await self.get_nba_markets()
-            for market in all_nba:
-                slug = market.get("slug", "")
-                if base_slug in slug or (
-                    away_slug in slug and home_slug in slug and game_date.strftime("%Y-%m-%d") in slug
-                ):
-                    markets.append(market)
+            data = await self.fetch("/events", params={"slug": slug})
+            if data and isinstance(data, list) and len(data) > 0:
+                event = data[0]
+                n_markets = len(event.get("markets", []))
+                logger.info(
+                    f"Polymarket event found: {slug} — {n_markets} markets"
+                )
+                return event
+            logger.debug(f"No Polymarket event for slug: {slug}")
+            return None
         except Exception as e:
-            logger.warning(f"Failed to fetch game markets for {base_slug}: {e}")
-        
-        return markets
+            logger.warning(f"Failed to fetch Polymarket event {slug}: {e}")
+            return None
+
+    async def get_games_for_date(
+        self,
+        games: list[tuple[str, str]],
+        game_date: date,
+    ) -> dict[str, dict[str, Any] | None]:
+        """Fetch events for multiple games in parallel.
+
+        Args:
+            games: List of (away_abbr, home_abbr) tuples.
+            game_date: The date of the games.
+
+        Returns:
+            Dict keyed by ``"{away_abbr}@{home_abbr}"`` → event dict or None.
+        """
+        async def _fetch_one(away: str, home: str) -> tuple[str, dict[str, Any] | None]:
+            key = f"{away}@{home}"
+            event = await self.get_game_event(away, home, game_date)
+            return key, event
+
+        tasks = [_fetch_one(away, home) for away, home in games]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        events: dict[str, dict[str, Any] | None] = {}
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Polymarket parallel fetch error: {result}")
+                continue
+            key, event = result
+            events[key] = event
+        return events
 
     @staticmethod
     def parse_market_prices(market: dict[str, Any]) -> dict[str, float]:
-        """Parse outcome prices from a Polymarket market response."""
+        """Parse outcome prices from a Polymarket market response.
+
+        Handles both JSON-string and list formats for outcomes/outcomePrices.
+        Returns ``{outcome_label: float_price}``.
+        """
         outcomes = market.get("outcomes", "")
         outcome_prices = market.get("outcomePrices", "")
-        
+
         if isinstance(outcome_prices, str):
             try:
-                import json
                 outcome_prices = json.loads(outcome_prices)
             except (json.JSONDecodeError, TypeError):
                 outcome_prices = []
-        
+
         if isinstance(outcomes, str):
             try:
-                import json
                 outcomes = json.loads(outcomes)
             except (json.JSONDecodeError, TypeError):
                 outcomes = []
-        
+
         prices: dict[str, float] = {}
         for outcome, price in zip(outcomes, outcome_prices):
-            prices[outcome] = float(price)
-        
+            try:
+                prices[str(outcome)] = float(price)
+            except (ValueError, TypeError):
+                continue
         return prices
