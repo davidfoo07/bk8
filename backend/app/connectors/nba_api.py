@@ -74,17 +74,43 @@ class NBAApiConnector(BaseConnector):
 
     async def get_team_ratings(self, season: str = "2025-26") -> list[dict[str, Any]]:
         """Fetch team offensive/defensive ratings for the season."""
-        params = {
-            "LeagueID": "00",
-            "Season": season,
-            "SeasonType": "Regular Season",
-            "PerMode": "PerGame",
-            "MeasureType": "Advanced",
-        }
-        data = await self.fetch("/leaguedashteamstats", params=params)
-        headers = data["resultSets"][0]["headers"]
-        rows = data["resultSets"][0]["rowSet"]
-        return [dict(zip(headers, row)) for row in rows]
+        # Try Advanced first, fall back to Base
+        for measure_type in ("Advanced", "Base"):
+            try:
+                params = {
+                    "LeagueID": "00",
+                    "Season": season,
+                    "SeasonType": "Regular Season",
+                    "PerMode": "PerGame",
+                    "MeasureType": measure_type,
+                }
+                data = await self.fetch("/leaguedashteamstats", params=params)
+                headers = data["resultSets"][0]["headers"]
+                rows = data["resultSets"][0]["rowSet"]
+                result = [dict(zip(headers, row)) for row in rows]
+                logger.info(f"Got team ratings via MeasureType={measure_type}")
+                return result
+            except Exception as e:
+                logger.warning(f"leaguedashteamstats MeasureType={measure_type} failed: {e}")
+                continue
+
+        # Last fallback: try teamestimatedmetrics
+        try:
+            params = {
+                "LeagueID": "00",
+                "Season": season,
+                "SeasonType": "Regular Season",
+            }
+            data = await self.fetch("/teamestimatedmetrics", params=params)
+            headers = data["resultSets"][0]["headers"]
+            rows = data["resultSets"][0]["rowSet"]
+            result = [dict(zip(headers, row)) for row in rows]
+            logger.info("Got team ratings via teamestimatedmetrics fallback")
+            return result
+        except Exception as e:
+            logger.warning(f"teamestimatedmetrics also failed: {e}")
+
+        return []
 
     async def get_todays_games(self, game_date: date | None = None) -> list[dict[str, Any]]:
         """Fetch today's game schedule."""

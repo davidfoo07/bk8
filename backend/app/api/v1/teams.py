@@ -3,6 +3,7 @@
 from fastapi import APIRouter, HTTPException
 
 from app.schemas.team import AdjustedRatings, TeamBase
+from app.services.pipeline import _cache, _fetch_team_ratings
 
 router = APIRouter(prefix="/teams", tags=["Teams"])
 
@@ -58,21 +59,38 @@ async def get_team(team_id: str) -> TeamBase:
 
 @router.get("/{team_id}/ratings")
 async def get_team_ratings(team_id: str) -> dict:
-    """Get current and adjusted ratings for a team."""
+    """Get current ratings for a team (live from NBA API)."""
     team_id = team_id.upper()
     if team_id not in NBA_TEAMS:
         raise HTTPException(status_code=404, detail=f"Team {team_id} not found")
 
-    # TODO: Pull from database/cache. For now, return placeholder.
-    return {
-        "team_id": team_id,
-        "full_name": NBA_TEAMS[team_id].full_name,
-        "current_ratings": {
-            "ortg": 112.0,
-            "drtg": 110.0,
-            "nrtg": 2.0,
-            "pace": 100.0,
-            "source": "nba_api",
-        },
-        "note": "Live data pipeline not yet connected. Sample data shown.",
-    }
+    # Fetch live ratings (cached in pipeline)
+    warnings: list[str] = []
+    ratings = await _fetch_team_ratings(warnings)
+    team_data = ratings.get(team_id)
+
+    if team_data:
+        return {
+            "team_id": team_id,
+            "full_name": NBA_TEAMS[team_id].full_name,
+            "current_ratings": {
+                "ortg": team_data["ortg"],
+                "drtg": team_data["drtg"],
+                "nrtg": team_data["nrtg"],
+                "pace": team_data.get("pace", 100.0),
+                "source": "nba_api (live)",
+            },
+        }
+    else:
+        return {
+            "team_id": team_id,
+            "full_name": NBA_TEAMS[team_id].full_name,
+            "current_ratings": {
+                "ortg": 112.0,
+                "drtg": 110.0,
+                "nrtg": 2.0,
+                "pace": 100.0,
+                "source": "fallback (NBA API unavailable)",
+            },
+            "warnings": warnings,
+        }
