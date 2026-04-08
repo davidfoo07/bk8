@@ -669,7 +669,7 @@ async def _process_single_game(
 
     spread_price = poly_prices.get("spread_home_yes")
     if spread_price is not None:
-        spread_cover_prob = prediction.home_win_prob
+        spread_cover_prob = prediction.spread_cover_prob
         spread_edge = calculate_edge(spread_cover_prob, spread_price)
         spread_edge_named = EdgeResult(
             yes_edge=spread_edge.yes_edge, no_edge=spread_edge.no_edge,
@@ -692,7 +692,7 @@ async def _process_single_game(
 
     total_price = poly_prices.get("total_over_yes")
     if total_price is not None:
-        over_prob = 0.5
+        over_prob = prediction.over_prob
         total_edge = calculate_edge(over_prob, total_price)
         total_edge_named = EdgeResult(
             yes_edge=total_edge.yes_edge, no_edge=total_edge.no_edge,

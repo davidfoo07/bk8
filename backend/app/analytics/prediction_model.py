@@ -142,13 +142,16 @@ def predict_game(
         projected_spread=round(-projected_margin, 1),  # Negative = home favored
         projected_total=round(projected_total, 1),
         home_win_prob=round(home_win_prob, 3),
+        spread_cover_prob=round(spread_cover_prob, 3),
+        over_prob=round(over_prob, 3),
         confidence=confidence,
     )
 
     logger.info(
         f"Prediction: NRtg diff={nrtg_diff:.1f}, margin={projected_margin:.1f}, "
         f"win prob={home_win_prob:.3f}, spread={prediction.projected_spread}, "
-        f"total={projected_total:.1f}"
+        f"total={projected_total:.1f}, "
+        f"spread_cover={spread_cover_prob:.3f}, over={over_prob:.3f}"
     )
 
     return prediction

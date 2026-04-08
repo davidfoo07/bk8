@@ -11,6 +11,8 @@ class GamePrediction(BaseModel):
     projected_spread: float
     projected_total: float
     home_win_prob: float
+    spread_cover_prob: float = 0.5  # Prob that home team covers the spread
+    over_prob: float = 0.5          # Prob that game goes over the total
     confidence: str = "MEDIUM"
 
 
