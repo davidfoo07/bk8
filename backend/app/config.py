@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     log_level: str = "DEBUG"
 
     # CORS
-    cors_origins: str = "http://localhost:3000"
+    cors_origins: str = "http://localhost:3000,http://localhost:3001"
 
     # API
     api_v1_prefix: str = "/api/v1"
