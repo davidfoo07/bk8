@@ -32,6 +32,11 @@ function getBestPrice(m: GameAnalysis["markets"][string]): number {
   return isHomeSide(m) ? (m.polymarket_home_yes || 0) : (m.polymarket_home_no || 0);
 }
 
+/** Get the model probability for the PICKED side (flip if pick is away/NO) */
+function getPickProb(m: GameAnalysis["markets"][string]): number {
+  return isHomeSide(m) ? m.model_probability : 1 - m.model_probability;
+}
+
 /** Get the EV for the recommended side */
 function getBestEv(m: GameAnalysis["markets"][string]): number {
   return isHomeSide(m) ? m.edge.yes_ev : m.edge.no_ev;
@@ -48,7 +53,6 @@ function formatLine(line: number | null | undefined, type: string): string {
 function getPickLabel(m: GameAnalysis["markets"][string], type: string): string {
   const side = m.edge.best_side;
   if (type === "spread" && m.line != null) {
-    // Figure out the line for the picked side
     const isHome = side === m.home_label;
     const line = isHome ? m.line : -m.line;
     const lineStr = line > 0 ? `+${line}` : `${line}`;
@@ -63,11 +67,11 @@ function getOverrideMode(
   status: string,
   overrides: Record<string, string>
 ): "FULL" | "HALF" | "OFF" | null {
-  if (status !== "QUESTIONABLE") return null; // Only QUESTIONABLE gets toggles
+  if (status !== "QUESTIONABLE") return null;
   if (playerName in overrides) {
     return overrides[playerName] as "FULL" | "HALF" | "OFF";
   }
-  return "HALF"; // Default
+  return "HALF";
 }
 
 /** Cycle to next state: OFF -> HALF -> FULL -> OFF */
@@ -147,7 +151,6 @@ function InjuryRow({
 
   return (
     <div className="flex items-center gap-2">
-      {/* Toggle (only for QUESTIONABLE) */}
       {isQuestionable ? (
         <InjuryToggle
           mode={overrideMode}
@@ -158,7 +161,6 @@ function InjuryRow({
           OUT
         </span>
       )}
-      {/* Player name */}
       <span
         className={`text-xs ${
           overrideMode === "OFF"
@@ -168,7 +170,6 @@ function InjuryRow({
       >
         {injury.player_name}
       </span>
-      {/* Reason (condensed) */}
       {injury.reason && (
         <span className="text-[10px] text-[#475569] truncate max-w-[140px]">
           {injury.reason}
@@ -202,7 +203,7 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
       `EDGES:`,
       ...Object.entries(game.markets).map(
         ([type, m]) =>
-          `${type}: ${m.edge.best_side} @ ${formatPrice(getBestPrice(m))} | Model: ${formatPct(m.model_probability)} | Edge: ${formatEdge(m.edge.best_edge)} | ${m.edge.verdict}`
+          `${type}: ${getPickLabel(m, type)} | Model: ${formatPct(getPickProb(m))} | Poly: ${formatPrice(getBestPrice(m))} | Edge: ${formatEdge(m.edge.best_edge)} | ${m.edge.verdict}`
       ),
     ];
     const success = await copyToClipboard(lines.join("\n"));
@@ -212,7 +213,6 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
     }
   };
 
-  // Combine home + away injuries
   const allInjuries = [
     ...game.home.injuries.map((i) => ({ ...i, side: "home" as const })),
     ...game.away.injuries.map((i) => ({ ...i, side: "away" as const })),
@@ -287,7 +287,7 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
           </div>
         </div>
 
-        {/* Quick injuries — compact summary with toggle hints */}
+        {/* Quick injuries */}
         <div className="flex gap-4 text-xs text-[#94a3b8] mb-3">
           <span>
             {game.home.team}:{" "}
@@ -337,7 +337,7 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
       {expanded && (
         <div className="border-t border-[#1e293b] p-4 bg-[#0d1320]">
 
-          {/* -- Injury Report with Toggles -- */}
+          {/* Injury Report with Toggles */}
           {(game.home.injuries.length > 0 || game.away.injuries.length > 0) && (
             <div className="mb-4">
               <div className="flex items-center gap-2 mb-2">
@@ -351,7 +351,6 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
                 )}
               </div>
               <div className="grid grid-cols-2 gap-4">
-                {/* Home injuries */}
                 <div>
                   <p className="text-[10px] text-[#64748b] font-semibold uppercase mb-1">
                     {game.home.team}
@@ -370,7 +369,6 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
                     )}
                   </div>
                 </div>
-                {/* Away injuries */}
                 <div>
                   <p className="text-[10px] text-[#64748b] font-semibold uppercase mb-1">
                     {game.away.team}
@@ -393,7 +391,7 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
             </div>
           )}
 
-          {/* -- Polymarket Live Prices -- */}
+          {/* Polymarket Live Prices */}
           <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-3">
             <span className="text-[#00C853]">●</span> Polymarket Live
           </h4>
@@ -405,6 +403,7 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
               const awayPrice = m.polymarket_home_no || 0;
               const bestSide = m.edge.best_side;
               const pickLabel = getPickLabel(m, type);
+              const pickProb = getPickProb(m);
 
               return (
                 <div key={type} className="flex items-center gap-3 bg-[#1a2235] rounded-lg p-3">
@@ -468,7 +467,7 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
                         {pickLabel}
                       </p>
                       <p className="text-[10px] text-[#64748b] font-mono">
-                        Model {formatPct(m.model_probability)} vs {formatPrice(getBestPrice(m))}
+                        Model {formatPct(pickProb)} vs {formatPrice(getBestPrice(m))}
                       </p>
                     </div>
                   </div>
@@ -477,7 +476,7 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
             })}
           </div>
 
-          {/* -- Edge Details Table (compact) -- */}
+          {/* Edge Details Table */}
           <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-2">
             Edge Details
           </h4>
@@ -504,7 +503,7 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
                       {formatPrice(getBestPrice(m))}
                     </td>
                     <td className="py-1.5 pr-3 text-right text-[#e2e8f0]">
-                      {formatPct(m.model_probability)}
+                      {formatPct(getPickProb(m))}
                     </td>
                     <td className={`py-1.5 pr-3 text-right font-semibold ${getVerdictColor(m.edge.verdict)}`}>
                       {formatEdge(m.edge.best_edge)}
