@@ -72,7 +72,30 @@ class NBAApiConnector(BaseConnector):
             return False
 
     async def get_team_ratings(self, season: str = "2025-26") -> list[dict[str, Any]]:
-        """Fetch team offensive/defensive ratings for the season."""
+        """Fetch team offensive/defensive ratings for the season.
+
+        Priority order (fastest-to-slowest, most reliable first):
+          1. teamestimatedmetrics — lightweight, rarely fails
+          2. leaguedashteamstats Advanced — returns real ORtg/DRtg but often 500s
+          3. leaguedashteamstats Base — PTS-based fallback
+        """
+        # Try teamestimatedmetrics first (most reliable, ~200ms)
+        try:
+            params = {"LeagueID": "00", "Season": season, "SeasonType": "Regular Season"}
+            data = await self.fetch("/teamestimatedmetrics", params=params)
+            result_set = data.get("resultSets") or data.get("resultSet")
+            if isinstance(result_set, list):
+                result_set = result_set[0]
+            if result_set:
+                headers = result_set["headers"]
+                rows = result_set["rowSet"]
+                result = [dict(zip(headers, row)) for row in rows]
+                logger.info(f"✅ Got team ratings via teamestimatedmetrics ({len(result)} teams)")
+                return result
+        except Exception as e:
+            logger.warning(f"teamestimatedmetrics failed: {e}")
+
+        # Fallback: leaguedashteamstats (often returns 500, slow retries)
         for measure_type in ("Advanced", "Base"):
             try:
                 params = {
@@ -84,27 +107,11 @@ class NBAApiConnector(BaseConnector):
                 headers = data["resultSets"][0]["headers"]
                 rows = data["resultSets"][0]["rowSet"]
                 result = [dict(zip(headers, row)) for row in rows]
-                logger.info(f"Got team ratings via MeasureType={measure_type}")
+                logger.info(f"Got team ratings via leaguedashteamstats MeasureType={measure_type}")
                 return result
             except Exception as e:
                 logger.warning(f"leaguedashteamstats MeasureType={measure_type} failed: {e}")
                 continue
-
-        # Fallback: teamestimatedmetrics
-        try:
-            params = {"LeagueID": "00", "Season": season, "SeasonType": "Regular Season"}
-            data = await self.fetch("/teamestimatedmetrics", params=params)
-            result_set = data.get("resultSets") or data.get("resultSet")
-            if isinstance(result_set, list):
-                result_set = result_set[0]
-            if result_set:
-                headers = result_set["headers"]
-                rows = result_set["rowSet"]
-                result = [dict(zip(headers, row)) for row in rows]
-                logger.info("Got team ratings via teamestimatedmetrics fallback")
-                return result
-        except Exception as e:
-            logger.warning(f"teamestimatedmetrics also failed: {e}")
 
         return []
 
