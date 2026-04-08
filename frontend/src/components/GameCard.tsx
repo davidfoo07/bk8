@@ -44,6 +44,19 @@ function formatLine(line: number | null | undefined, type: string): string {
   return line > 0 ? `+${line}` : `${line}`;
 }
 
+/** Build a short pick label like "Grizzlies +21.5" or "Under" */
+function getPickLabel(m: GameAnalysis["markets"][string], type: string): string {
+  const side = m.edge.best_side;
+  if (type === "spread" && m.line != null) {
+    // Figure out the line for the picked side
+    const isHome = side === m.home_label;
+    const line = isHome ? m.line : -m.line;
+    const lineStr = line > 0 ? `+${line}` : `${line}`;
+    return `${side} ${lineStr}`;
+  }
+  return side;
+}
+
 /** Get override mode for a player, or "HALF" as default for QUESTIONABLE */
 function getOverrideMode(
   playerName: string,
@@ -57,14 +70,14 @@ function getOverrideMode(
   return "HALF"; // Default
 }
 
-/** Cycle to next state: OFF → HALF → FULL → OFF */
+/** Cycle to next state: OFF -> HALF -> FULL -> OFF */
 function nextMode(current: "FULL" | "HALF" | "OFF"): "FULL" | "HALF" | "OFF" {
   if (current === "OFF") return "HALF";
   if (current === "HALF") return "FULL";
   return "OFF";
 }
 
-// ─── 3-State Toggle Button ────────────────────────────────────────
+// --- 3-State Toggle Button ---
 
 function InjuryToggle({
   mode,
@@ -119,7 +132,7 @@ function InjuryToggle({
   );
 }
 
-// ─── Injury Row ───────────────────────────────────────────────────
+// --- Injury Row ---
 
 function InjuryRow({
   injury,
@@ -165,7 +178,7 @@ function InjuryRow({
   );
 }
 
-// ─── Main Component ──────────────────────────────────────────────
+// --- Main Component ---
 
 export default function GameCard({ game, injuryOverrides, onInjuryToggle }: GameCardProps) {
   const [expanded, setExpanded] = useState(false);
@@ -324,7 +337,7 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
       {expanded && (
         <div className="border-t border-[#1e293b] p-4 bg-[#0d1320]">
 
-          {/* ── Injury Report with Toggles ── */}
+          {/* -- Injury Report with Toggles -- */}
           {(game.home.injuries.length > 0 || game.away.injuries.length > 0) && (
             <div className="mb-4">
               <div className="flex items-center gap-2 mb-2">
@@ -380,7 +393,7 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
             </div>
           )}
 
-          {/* ── Polymarket Live Prices ── */}
+          {/* -- Polymarket Live Prices -- */}
           <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-3">
             <span className="text-[#00C853]">●</span> Polymarket Live
           </h4>
@@ -391,6 +404,7 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
               const homePrice = m.polymarket_home_yes || 0;
               const awayPrice = m.polymarket_home_no || 0;
               const bestSide = m.edge.best_side;
+              const pickLabel = getPickLabel(m, type);
 
               return (
                 <div key={type} className="flex items-center gap-3 bg-[#1a2235] rounded-lg p-3">
@@ -435,29 +449,35 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
                     </div>
                   </div>
 
-                  {/* Model vs Market comparison */}
-                  <div className="w-24 text-right shrink-0">
-                    <p className="text-xs text-[#64748b]">Model</p>
-                    <p className="text-sm font-mono text-[#e2e8f0] font-semibold">
-                      {formatPct(m.model_probability)}
-                    </p>
-                  </div>
-
-                  {/* Edge + Verdict */}
-                  <div className="w-28 text-right shrink-0">
-                    <p className={`text-sm font-mono font-bold ${getVerdictColor(m.edge.verdict)}`}>
-                      {formatEdge(m.edge.best_edge)}
-                    </p>
-                    <span className={`text-[10px] px-1.5 py-0.5 rounded border font-semibold ${getVerdictBg(m.edge.verdict)}`}>
-                      {m.edge.verdict}
-                    </span>
+                  {/* Pick callout — clear recommendation */}
+                  <div className="w-44 shrink-0">
+                    <div className={`rounded-md px-3 py-1.5 text-right ${
+                      m.edge.verdict === "STRONG BUY" ? "bg-[#00C853]/10" :
+                      m.edge.verdict === "BUY" ? "bg-[#4CAF50]/10" :
+                      "bg-[#1e293b]/50"
+                    }`}>
+                      <div className="flex items-center justify-end gap-1.5">
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded border font-semibold ${getVerdictBg(m.edge.verdict)}`}>
+                          {m.edge.verdict}
+                        </span>
+                        <span className={`text-sm font-mono font-bold ${getVerdictColor(m.edge.verdict)}`}>
+                          {formatEdge(m.edge.best_edge)}
+                        </span>
+                      </div>
+                      <p className={`text-xs font-semibold mt-0.5 ${getVerdictColor(m.edge.verdict)}`}>
+                        {pickLabel}
+                      </p>
+                      <p className="text-[10px] text-[#64748b] font-mono">
+                        Model {formatPct(m.model_probability)} vs {formatPrice(getBestPrice(m))}
+                      </p>
+                    </div>
                   </div>
                 </div>
               );
             })}
           </div>
 
-          {/* ── Edge Details Table (compact) ── */}
+          {/* -- Edge Details Table (compact) -- */}
           <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-2">
             Edge Details
           </h4>
@@ -479,7 +499,7 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
                 {Object.entries(game.markets).map(([type, m]) => (
                   <tr key={type} className="border-t border-[#1e293b]">
                     <td className="py-1.5 pr-3 text-[#e2e8f0] capitalize">{type}</td>
-                    <td className="py-1.5 pr-3 text-[#e2e8f0]">{m.edge.best_side}</td>
+                    <td className="py-1.5 pr-3 text-[#e2e8f0]">{getPickLabel(m, type)}</td>
                     <td className="py-1.5 pr-3 text-right text-[#e2e8f0]">
                       {formatPrice(getBestPrice(m))}
                     </td>
