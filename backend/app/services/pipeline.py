@@ -22,7 +22,7 @@ from loguru import logger
 
 from app.analytics.edge_calculator import calculate_edge, calculate_game_edges
 from app.analytics.lineup_adjustment import OnOffSplitModel, compute_player_impact
-from app.analytics.prediction_model import calculate_schedule_modifier, predict_game
+from app.analytics.prediction_model import calculate_schedule_modifier, predict_game, SPREAD_TO_WIN_PROB_SIGMA
 from app.analytics.schedule_engine import calculate_schedule_context, determine_motivation
 from app.connectors.injuries import InjuryFeedConnector
 from app.connectors.nba_api import NBAApiConnector
@@ -786,8 +786,7 @@ def _calculate_live_prediction(
     live_projected_final_margin = live_margin + pre_game_remaining_margin
 
     # Win probability via logistic, with variance shrinking as time passes
-    GAME_STD_DEV = 12.0
-    adjusted_std = GAME_STD_DEV * math.sqrt(time_remaining_pct)
+    adjusted_std = SPREAD_TO_WIN_PROB_SIGMA * math.sqrt(time_remaining_pct)
     adjusted_std = max(adjusted_std, 0.5)  # Floor to avoid division issues
 
     live_win_prob = 1.0 / (1.0 + math.exp(-live_projected_final_margin / adjusted_std))
