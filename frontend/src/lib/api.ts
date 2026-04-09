@@ -29,6 +29,38 @@ export interface SavedDateEntry {
   file_size_kb: number;
 }
 
+export interface SimBet {
+  game: string;
+  market_type: string;
+  selection: string;
+  side: string;
+  verdict: string;
+  entry_price: number;
+  model_prob: number;
+  edge: number;
+  kelly_fraction: number;
+  flat_result: string | null;
+  flat_pnl: number;
+  kelly_amount: number;
+  kelly_result: string | null;
+  kelly_pnl: number;
+}
+
+export interface DailySimulation {
+  date: string;
+  total_bets: number;
+  flat_wins: number;
+  flat_losses: number;
+  flat_record: string;
+  flat_pnl: number;
+  flat_roi: number;
+  kelly_wins: number;
+  kelly_losses: number;
+  kelly_pnl: number;
+  kelly_roi: number;
+  bets: SimBet[];
+}
+
 export const api = {
   /** Get full analysis for today's games */
   getTodaysGames: () => fetchJSON<DailyAnalysis>("/games/today"),
@@ -64,4 +96,17 @@ export const api = {
 
   /** Get bet history with stats */
   getBetHistory: () => fetchJSON<BetHistoryResponse>("/bets/history"),
+
+  /** Auto-resolve pending bets against actual NBA scores */
+  resolveBets: () =>
+    fetchJSON<{ resolved: number; wins: number; losses: number; total_pnl: number }>(
+      "/bets/resolve",
+      { method: "POST" },
+    ),
+
+  /** List all dates available for simulation */
+  getSimulationDates: () => fetchJSON<SavedDateEntry[]>("/simulation/"),
+
+  /** Run simulation for a specific date */
+  getSimulation: (date: string) => fetchJSON<DailySimulation>(`/simulation/${date}`),
 };

@@ -30,6 +30,7 @@ export default function Header() {
     { href: "/", label: "Dashboard" },
     { href: "/history", label: "History" },
     { href: "/bets", label: "Bet Tracker" },
+    { href: "/simulation", label: "Simulation" },
     { href: "/accuracy", label: "Model Accuracy" },
   ];
 

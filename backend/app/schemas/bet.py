@@ -20,6 +20,7 @@ class BetCreate(BaseModel):
     amount_usd: float = Field(..., gt=0)
     kelly_fraction: float = 0.0
     notes: str = ""
+    system_aligned: bool = True  # True = user agrees with model recommendation
 
 
 class BetResponse(BaseModel):
@@ -36,6 +37,7 @@ class BetResponse(BaseModel):
     kelly_fraction: float
     result: str | None = None
     pnl: float | None = None
+    system_aligned: bool = True
     placed_at: datetime
     resolved_at: datetime | None = None
 

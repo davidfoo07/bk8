@@ -2,23 +2,48 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Header from "@/components/Header";
-import type { BetHistoryResponse } from "@/types/api";
+import type { BetHistoryResponse, BetResponse } from "@/types/api";
 import { api } from "@/lib/api";
 import { formatPct, formatEdge } from "@/lib/utils";
 
+/** Translate raw selection + side into plain-English bet description. */
+function describeBet(bet: BetResponse): string {
+  const sel = bet.selection || "";
+  const side = bet.side;
+  const teamsMatch = sel.match(/^(\w+)\s*@\s*(\w+)/);
+  const awayAbbr = teamsMatch?.[1] || "?";
+  const homeAbbr = teamsMatch?.[2] || "?";
+
+  if (bet.market_type === "moneyline") {
+    return side === "YES" ? `${homeAbbr} ML` : `${awayAbbr} ML`;
+  }
+  if (bet.market_type === "spread") {
+    const spreadMatch = sel.match(/—\s*\w[\w\s]*?\s+([+-]?\d+\.?\d*)/);
+    const namedLine = spreadMatch ? parseFloat(spreadMatch[1]) : 0;
+    if (side === "YES") {
+      const homeLine = sel.toLowerCase().includes(homeAbbr.toLowerCase()) ? namedLine : -namedLine;
+      return `${homeAbbr} ${homeLine > 0 ? "+" : ""}${homeLine}`;
+    } else {
+      const awayLine = sel.toLowerCase().includes(awayAbbr.toLowerCase()) ? namedLine : -namedLine;
+      return `${awayAbbr} ${awayLine > 0 ? "+" : ""}${awayLine}`;
+    }
+  }
+  if (bet.market_type === "total") {
+    const totalMatch = sel.match(/—\s*(Over|Under)\s+(\d+\.?\d*)/i);
+    const line = totalMatch ? totalMatch[2] : "?";
+    return side === "YES" ? `Over ${line}` : `Under ${line}`;
+  }
+  return sel;
+}
+
 export default function BetTracker() {
   const [history, setHistory] = useState<BetHistoryResponse>({
-    total_bets: 0,
-    wins: 0,
-    losses: 0,
-    pushes: 0,
-    pending: 0,
-    total_pnl: 0,
-    win_rate: 0,
-    roi: 0,
-    bets: [],
+    total_bets: 0, wins: 0, losses: 0, pushes: 0, pending: 0,
+    total_pnl: 0, win_rate: 0, roi: 0, bets: [],
   });
   const [loading, setLoading] = useState(true);
+  const [resolving, setResolving] = useState(false);
+  const [resolveMsg, setResolveMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const loadHistory = useCallback(async () => {
@@ -33,8 +58,30 @@ export default function BetTracker() {
     }
   }, []);
 
+  const handleResolve = useCallback(async () => {
+    setResolving(true);
+    setResolveMsg(null);
+    try {
+      const res = await api.resolveBets();
+      if (res.resolved > 0) {
+        setResolveMsg(`Resolved ${res.resolved} bets: ${res.wins}W ${res.losses}L, PnL: $${res.total_pnl >= 0 ? "+" : ""}${res.total_pnl.toFixed(2)}`);
+      } else {
+        setResolveMsg("No pending bets to resolve (games may not be final yet)");
+      }
+      await loadHistory();
+    } catch (err) {
+      setResolveMsg(`Error: ${err instanceof Error ? err.message : "Failed to resolve"}`);
+    } finally {
+      setResolving(false);
+    }
+  }, [loadHistory]);
+
   useEffect(() => {
-    loadHistory();
+    (async () => {
+      setLoading(true);
+      try { await api.resolveBets(); } catch { /* ignore */ }
+      await loadHistory();
+    })();
   }, [loadHistory]);
 
   return (
@@ -42,32 +89,49 @@ export default function BetTracker() {
       <Header />
       <main className="max-w-7xl mx-auto px-6 py-6">
         <div className="flex items-center justify-between mb-6">
-          <h1 className="text-xl font-bold text-[#e2e8f0]">Bet Tracker</h1>
-          <button
-            onClick={loadHistory}
-            className="px-3 py-1.5 text-xs rounded bg-[#1a2235] text-[#94a3b8] border border-[#1e293b] hover:border-[#334155] hover:text-[#e2e8f0] transition-colors font-medium"
-          >
-            ↻ Refresh
-          </button>
+          <div>
+            <h1 className="text-xl font-bold text-[#e2e8f0]">Bet Tracker</h1>
+            <p className="text-xs text-[#64748b] mt-0.5">Your actual bets — log any direction, system tracks alignment</p>
+          </div>
+          <div className="flex items-center gap-2">
+            {history.pending > 0 && (
+              <button
+                onClick={handleResolve}
+                disabled={resolving}
+                className="px-3 py-1.5 text-xs rounded bg-[#4CAF50]/20 text-[#4CAF50] border border-[#4CAF50]/30 hover:bg-[#4CAF50]/30 transition-colors font-medium disabled:opacity-50"
+              >
+                {resolving ? "Resolving..." : `⚡ Resolve ${history.pending} Pending`}
+              </button>
+            )}
+            <button
+              onClick={loadHistory}
+              className="px-3 py-1.5 text-xs rounded bg-[#1a2235] text-[#94a3b8] border border-[#1e293b] hover:border-[#334155] hover:text-[#e2e8f0] transition-colors font-medium"
+            >
+              ↻ Refresh
+            </button>
+          </div>
         </div>
 
-        {/* Loading state */}
+        {resolveMsg && (
+          <div className={`p-3 rounded-lg text-sm mb-4 ${
+            resolveMsg.startsWith("Error")
+              ? "bg-[#FF1744]/10 border border-[#FF1744]/30 text-[#FF1744]"
+              : "bg-[#4CAF50]/10 border border-[#4CAF50]/30 text-[#4CAF50]"
+          }`}>
+            {resolveMsg}
+          </div>
+        )}
+
         {loading && (
           <div className="flex items-center justify-center py-12">
             <div className="w-8 h-8 border-2 border-[#2979FF]/30 border-t-[#2979FF] rounded-full animate-spin" />
           </div>
         )}
 
-        {/* Error state */}
         {error && (
           <div className="bg-[#FF1744]/10 border border-[#FF1744]/30 rounded-lg p-4 mb-6">
             <p className="text-sm text-[#FF1744]">{error}</p>
-            <button
-              onClick={loadHistory}
-              className="mt-2 text-xs text-[#FF1744] underline hover:text-[#FF1744]/80"
-            >
-              Retry
-            </button>
+            <button onClick={loadHistory} className="mt-2 text-xs text-[#FF1744] underline hover:text-[#FF1744]/80">Retry</button>
           </div>
         )}
 
@@ -79,7 +143,7 @@ export default function BetTracker() {
                 <span className="text-xs text-[#64748b] uppercase">Total Bets</span>
                 <p className="text-2xl font-mono font-bold text-[#e2e8f0] mt-1">{history.total_bets}</p>
                 <p className="text-xs text-[#64748b] mt-0.5">
-                  {history.pending > 0 ? `${history.pending} pending` : "—"}
+                  {history.pending > 0 ? `${history.pending} pending` : "All resolved"}
                 </p>
               </div>
               <div className="bg-[#111827] border border-[#1e293b] rounded-lg p-4">
@@ -88,7 +152,7 @@ export default function BetTracker() {
                   {history.wins}-{history.losses}-{history.pushes}
                 </p>
                 <p className="text-xs text-[#64748b] mt-0.5">
-                  {history.total_bets > 0 ? `Win rate: ${formatPct(history.win_rate)}` : "—"}
+                  {(history.wins + history.losses) > 0 ? `Win rate: ${formatPct(history.win_rate)}` : "—"}
                 </p>
               </div>
               <div className="bg-[#111827] border border-[#1e293b] rounded-lg p-4">
@@ -118,67 +182,76 @@ export default function BetTracker() {
                     <thead>
                       <tr className="text-xs text-[#64748b] uppercase border-b border-[#1e293b]">
                         <th className="text-left p-3">Date</th>
-                        <th className="text-left p-3">Selection</th>
+                        <th className="text-left p-3">Game</th>
+                        <th className="text-left p-3">Your Bet</th>
+                        <th className="text-center p-3">System</th>
                         <th className="text-left p-3">Market</th>
                         <th className="text-right p-3">Price</th>
                         <th className="text-right p-3">Model</th>
                         <th className="text-right p-3">Edge</th>
                         <th className="text-right p-3">Amount</th>
-                        <th className="text-right p-3">Kelly</th>
                         <th className="text-center p-3">Result</th>
                         <th className="text-right p-3">P&L</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {history.bets.map((bet) => (
-                        <tr key={bet.id} className="border-t border-[#1e293b] hover:bg-[#1a2235]/50">
-                          <td className="p-3 text-xs font-mono text-[#94a3b8]">
-                            {new Date(bet.placed_at).toLocaleDateString("en-US", {
-                              month: "short",
-                              day: "numeric",
-                            })}
-                          </td>
-                          <td className="p-3 text-[#e2e8f0] max-w-[200px] truncate" title={bet.selection}>
-                            {bet.selection}
-                          </td>
-                          <td className="p-3 text-[#94a3b8] capitalize">{bet.market_type}</td>
-                          <td className="p-3 text-right font-mono text-[#e2e8f0]">
-                            {(bet.entry_price * 100).toFixed(0)}¢
-                          </td>
-                          <td className="p-3 text-right font-mono text-[#94a3b8]">
-                            {formatPct(bet.model_probability)}
-                          </td>
-                          <td className="p-3 text-right font-mono text-[#4CAF50]">
-                            {formatEdge(bet.edge_at_entry)}
-                          </td>
-                          <td className="p-3 text-right font-mono text-[#e2e8f0]">
-                            ${bet.amount_usd.toFixed(2)}
-                          </td>
-                          <td className="p-3 text-right font-mono text-[#94a3b8]">
-                            {(bet.kelly_fraction * 100).toFixed(1)}%
-                          </td>
-                          <td className="p-3 text-center">
-                            <span
-                              className={`text-xs px-2 py-0.5 rounded font-semibold ${
-                                bet.result === "WIN"
-                                  ? "bg-[#4CAF50]/20 text-[#4CAF50]"
-                                  : bet.result === "LOSS"
-                                  ? "bg-[#FF1744]/20 text-[#FF1744]"
-                                  : bet.result === "PUSH"
-                                  ? "bg-[#FFD600]/20 text-[#FFD600]"
-                                  : "bg-[#78909C]/20 text-[#78909C]"
-                              }`}
-                            >
-                              {bet.result || "PENDING"}
-                            </span>
-                          </td>
-                          <td className={`p-3 text-right font-mono font-semibold ${
-                            (bet.pnl || 0) > 0 ? "text-[#4CAF50]" : (bet.pnl || 0) < 0 ? "text-[#FF1744]" : "text-[#78909C]"
-                          }`}>
-                            {bet.pnl !== null && bet.pnl !== undefined ? `${bet.pnl >= 0 ? "+" : ""}$${bet.pnl.toFixed(2)}` : "—"}
-                          </td>
-                        </tr>
-                      ))}
+                      {history.bets.map((bet) => {
+                        const gameMatch = bet.selection.match(/^(\w+)\s*@\s*(\w+)/);
+                        const gameLabel = gameMatch ? `${gameMatch[1]} @ ${gameMatch[2]}` : bet.game_id;
+
+                        return (
+                          <tr key={bet.id} className="border-t border-[#1e293b] hover:bg-[#1a2235]/50">
+                            <td className="p-3 text-xs font-mono text-[#94a3b8]">
+                              {new Date(bet.placed_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                            </td>
+                            <td className="p-3 text-[#94a3b8] font-semibold whitespace-nowrap">
+                              {gameLabel}
+                            </td>
+                            <td className="p-3 text-[#e2e8f0] font-semibold whitespace-nowrap">
+                              {describeBet(bet)}
+                            </td>
+                            <td className="p-3 text-center">
+                              {bet.system_aligned ? (
+                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#4CAF50]/15 text-[#4CAF50] border border-[#4CAF50]/30 font-semibold">
+                                  ✓ SYS
+                                </span>
+                              ) : (
+                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#FFD600]/15 text-[#FFD600] border border-[#FFD600]/30 font-semibold">
+                                  ✗ OWN
+                                </span>
+                              )}
+                            </td>
+                            <td className="p-3 text-[#94a3b8] capitalize">{bet.market_type}</td>
+                            <td className="p-3 text-right font-mono text-[#e2e8f0]">
+                              {(bet.entry_price * 100).toFixed(0)}¢
+                            </td>
+                            <td className="p-3 text-right font-mono text-[#94a3b8]">
+                              {formatPct(bet.model_probability)}
+                            </td>
+                            <td className="p-3 text-right font-mono text-[#4CAF50]">
+                              {formatEdge(bet.edge_at_entry)}
+                            </td>
+                            <td className="p-3 text-right font-mono text-[#e2e8f0]">
+                              ${bet.amount_usd.toFixed(2)}
+                            </td>
+                            <td className="p-3 text-center">
+                              <span className={`text-xs px-2 py-0.5 rounded font-semibold ${
+                                bet.result === "WIN" ? "bg-[#4CAF50]/20 text-[#4CAF50]"
+                                : bet.result === "LOSS" ? "bg-[#FF1744]/20 text-[#FF1744]"
+                                : bet.result === "PUSH" ? "bg-[#FFD600]/20 text-[#FFD600]"
+                                : "bg-[#78909C]/20 text-[#78909C]"
+                              }`}>
+                                {bet.result || "PENDING"}
+                              </span>
+                            </td>
+                            <td className={`p-3 text-right font-mono font-semibold ${
+                              (bet.pnl || 0) > 0 ? "text-[#4CAF50]" : (bet.pnl || 0) < 0 ? "text-[#FF1744]" : "text-[#78909C]"
+                            }`}>
+                              {bet.pnl != null ? `${bet.pnl >= 0 ? "+" : ""}$${bet.pnl.toFixed(2)}` : "—"}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

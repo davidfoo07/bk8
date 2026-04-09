@@ -96,7 +96,7 @@ class Injury(Base):
     player_id: Mapped[str] = mapped_column(ForeignKey("players.id"))
     team_id: Mapped[str] = mapped_column(ForeignKey("teams.id"))
     game_date: Mapped[date | None] = mapped_column(Date)
-    status: Mapped[str | None] = mapped_column(String(15))  # OUT, DOUBTFUL, QUESTIONABLE, etc.
+    status: Mapped[str | None] = mapped_column(String(15))
     reason: Mapped[str | None] = mapped_column(Text)
     source: Mapped[str | None] = mapped_column(String(20))
     is_manual_override: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -172,8 +172,8 @@ class Bet(Base):
     __tablename__ = "bets"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    game_id: Mapped[str] = mapped_column(String(50), nullable=False)  # No FK — pipeline is in-memory
-    prediction_id: Mapped[int | None] = mapped_column(Integer)  # No FK
+    game_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    prediction_id: Mapped[int | None] = mapped_column(Integer)
     market_type: Mapped[str | None] = mapped_column(String(15))
     selection: Mapped[str | None] = mapped_column(String(200))
     side: Mapped[str | None] = mapped_column(String(3))  # YES | NO
@@ -185,6 +185,7 @@ class Bet(Base):
     notes: Mapped[str | None] = mapped_column(Text)
     result: Mapped[str | None] = mapped_column(String(5))  # WIN | LOSS | PUSH
     pnl: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    system_aligned: Mapped[bool] = mapped_column(Boolean, default=True)  # user agreed with model?
     placed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

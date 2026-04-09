@@ -100,7 +100,7 @@ export interface LivePlayerStats {
 }
 
 export interface LiveGameState {
-  game_status: 1 | 2 | 3; // 1=SCHEDULED, 2=LIVE, 3=FINAL
+  game_status: 1 | 2 | 3;
   game_status_text: string;
   period: number;
   game_clock: string;
@@ -170,6 +170,7 @@ export interface BetCreate {
   amount_usd: number;
   kelly_fraction: number;
   notes: string;
+  system_aligned: boolean;
 }
 
 export interface BetResponse {
@@ -185,6 +186,7 @@ export interface BetResponse {
   kelly_fraction: number;
   result: string | null;
   pnl: number | null;
+  system_aligned: boolean;
   placed_at: string;
   resolved_at: string | null;
 }
