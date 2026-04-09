@@ -8,10 +8,39 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
+from sqlalchemy import text
 
 from app.api.v1.router import api_v1_router
 from app.config import settings
+from app.models.database import engine
 from app.services.scheduler import get_refresh_status, start_scheduler, stop_scheduler
+
+
+async def _auto_migrate() -> None:
+    """Ensure DB schema has all columns the ORM expects.
+
+    Lightweight forward-only migration — only ADDs missing columns,
+    never drops or renames. Safe to run on every startup.
+    """
+    migrations: list[str] = [
+        # 2026-04-10: system_aligned flag for bet tracking
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'bets' AND column_name = 'system_aligned'
+            ) THEN
+                ALTER TABLE bets ADD COLUMN system_aligned BOOLEAN DEFAULT TRUE;
+                UPDATE bets SET system_aligned = TRUE;
+            END IF;
+        END $$;
+        """,
+    ]
+    async with engine.begin() as conn:
+        for sql in migrations:
+            await conn.execute(text(sql))
+    logger.info("Auto-migration check complete")
 
 
 @asynccontextmanager
@@ -19,6 +48,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler for startup/shutdown."""
     logger.info("Starting CourtEdge API...")
     logger.info(f"Environment: {settings.environment}")
+
+    # Ensure DB schema is up to date
+    await _auto_migrate()
 
     # Start background scheduler for auto data refresh
     start_scheduler()
