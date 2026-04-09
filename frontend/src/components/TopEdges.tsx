@@ -5,9 +5,10 @@ import { getVerdictBg, formatEdge, formatPrice } from "@/lib/utils";
 
 interface TopEdgesProps {
   edges: TopEdge[];
+  onEdgeClick?: (gameId: string) => void;
 }
 
-export default function TopEdges({ edges }: TopEdgesProps) {
+export default function TopEdges({ edges, onEdgeClick }: TopEdgesProps) {
   if (edges.length === 0) return null;
 
   return (
@@ -17,9 +18,11 @@ export default function TopEdges({ edges }: TopEdgesProps) {
       </h2>
       <div className="flex flex-wrap gap-3">
         {edges.slice(0, 5).map((edge, i) => (
-          <div
+          <button
             key={i}
-            className="flex items-center gap-2 px-3 py-2 rounded-md bg-[#1a2235] border border-[#1e293b]"
+            type="button"
+            onClick={() => onEdgeClick?.(edge.game_id)}
+            className="flex items-center gap-2 px-3 py-2 rounded-md bg-[#1a2235] border border-[#1e293b] hover:border-[#334155] hover:bg-[#1e293b] transition-colors cursor-pointer text-left"
           >
             <span
               className={`text-xs px-2 py-0.5 rounded border font-semibold ${getVerdictBg(edge.verdict)}`}
@@ -35,7 +38,7 @@ export default function TopEdges({ edges }: TopEdgesProps) {
             <span className="text-xs text-[#4CAF50] font-mono font-semibold">
               {formatEdge(edge.edge)}
             </span>
-          </div>
+          </button>
         ))}
       </div>
     </div>

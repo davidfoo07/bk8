@@ -80,6 +80,51 @@ export interface TeamGameData {
   schedule: ScheduleContext;
 }
 
+export interface LivePlayerStats {
+  name: string;
+  player_id: string;
+  position: string;
+  team: string;
+  minutes: string;
+  points: number;
+  rebounds: number;
+  assists: number;
+  steals: number;
+  blocks: number;
+  turnovers: number;
+  fouls: number;
+  plus_minus: number;
+  fg_pct: number;
+  three_pct: number;
+  ft_pct: number;
+}
+
+export interface LiveGameState {
+  game_status: 1 | 2 | 3; // 1=SCHEDULED, 2=LIVE, 3=FINAL
+  game_status_text: string;
+  period: number;
+  game_clock: string;
+  home_score: number;
+  away_score: number;
+  nba_game_id: string;
+  home_periods: { period: number; score: number }[];
+  away_periods: { period: number; score: number }[];
+  home_leader: { name?: string; points?: number; rebounds?: number; assists?: number };
+  away_leader: { name?: string; points?: number; rebounds?: number; assists?: number };
+  home_players: LivePlayerStats[];
+  away_players: LivePlayerStats[];
+}
+
+export interface LivePrediction {
+  home_win_prob: number;
+  pre_game_home_win_prob: number;
+  projected_final_margin: number;
+  live_margin: number;
+  time_remaining_pct: number;
+  is_final: boolean;
+  home_won: boolean | null;
+}
+
 export interface GameAnalysis {
   game_id: string;
   tipoff: string | null;
@@ -88,12 +133,15 @@ export interface GameAnalysis {
   home: TeamGameData;
   away: TeamGameData;
   model: GamePrediction;
+  live: LiveGameState;
+  live_prediction: LivePrediction | null;
   markets: Record<string, MarketEdge>;
   data_quality: DataQuality;
 }
 
 export interface TopEdge {
   game: string;
+  game_id: string;
   market: string;
   selection: string;
   price: number;

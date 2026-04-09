@@ -7,9 +7,53 @@ from datetime import date, datetime
 from pydantic import BaseModel
 
 from app.schemas.market import MarketEdge
-from app.schemas.prediction import DataQuality, GamePrediction
+from app.schemas.prediction import DataQuality, GamePrediction, LivePrediction
 from app.schemas.team import AdjustedRatings, InjurySchema, ScheduleContext, StandingsInfo
 
+
+# ─── Live Game State ────────────────────────────────────────────────
+
+class LivePlayerStats(BaseModel):
+    """Per-player live box score during a game."""
+    name: str
+    player_id: str = ""
+    position: str = ""
+    team: str = ""
+    minutes: str = "0:00"
+    points: int = 0
+    rebounds: int = 0
+    assists: int = 0
+    steals: int = 0
+    blocks: int = 0
+    turnovers: int = 0
+    fouls: int = 0
+    plus_minus: int = 0
+    fg_pct: float = 0.0
+    three_pct: float = 0.0
+    ft_pct: float = 0.0
+
+
+class LiveGameState(BaseModel):
+    """Real-time game state from NBA scoreboardv3 + boxscoretraditionalv3."""
+    game_status: int = 1  # 1=SCHEDULED, 2=LIVE, 3=FINAL
+    game_status_text: str = ""  # "7:30 pm ET", "Q3 5:47", "Final"
+    period: int = 0  # 0=not started, 1-4=regulation, 5+=OT
+    game_clock: str = ""  # "5:47" remaining in period, "" if not live
+    home_score: int = 0
+    away_score: int = 0
+    nba_game_id: str = ""  # Real NBA 10-digit game ID for boxscore calls
+    # Quarter scores: [{period: 1, score: 28}, ...]
+    home_periods: list[dict] = []
+    away_periods: list[dict] = []
+    # Game leaders from scoreboardv3
+    home_leader: dict = {}  # {name, points, rebounds, assists}
+    away_leader: dict = {}
+    # Live box score (only populated for LIVE games, from boxscoretraditionalv3)
+    home_players: list[LivePlayerStats] = []
+    away_players: list[LivePlayerStats] = []
+
+
+# ─── Team + Game Analysis ──────────────────────────────────────────
 
 class TeamGameData(BaseModel):
     """All data for one team in a game."""
@@ -37,7 +81,9 @@ class GameAnalysis(BaseModel):
     venue: str = ""
     home: TeamGameData
     away: TeamGameData
-    model: GamePrediction
+    model: GamePrediction  # Pre-game prediction (always present)
+    live: LiveGameState = LiveGameState()  # Live scores + status + box score
+    live_prediction: LivePrediction | None = None  # Score-adjusted prediction (only when LIVE or FINAL)
     markets: dict[str, MarketEdge] = {}
     data_quality: DataQuality = DataQuality()
 
@@ -45,6 +91,7 @@ class GameAnalysis(BaseModel):
 class TopEdge(BaseModel):
     """Summary of a top edge opportunity."""
     game: str
+    game_id: str = ""
     market: str
     selection: str
     price: float

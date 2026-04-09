@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
-import type { GameAnalysis, InjuryInfo } from "@/types/api";
+import { useEffect, useState } from "react";
+import type { GameAnalysis, InjuryInfo, LivePlayerStats } from "@/types/api";
+import BetLogModal from "@/components/BetLogModal";
 import {
   getVerdictBg,
   getVerdictColor,
@@ -19,6 +20,7 @@ interface GameCardProps {
   game: GameAnalysis;
   injuryOverrides: Record<string, string>;
   onInjuryToggle: (playerName: string, mode: "FULL" | "HALF" | "OFF") => void;
+  forceExpanded?: boolean;
 }
 
 /** Is the recommended side the "home" side of the market? */
@@ -79,6 +81,31 @@ function nextMode(current: "FULL" | "HALF" | "OFF"): "FULL" | "HALF" | "OFF" {
   if (current === "OFF") return "HALF";
   if (current === "HALF") return "FULL";
   return "OFF";
+}
+
+/** Format leader stats line e.g. "J. Morant: 25pts 5reb 8ast" */
+function formatLeader(leader: { name?: string; points?: number; rebounds?: number; assists?: number }): string | null {
+  if (!leader.name) return null;
+  const parts: string[] = [];
+  if (leader.points != null) parts.push(`${leader.points}pts`);
+  if (leader.rebounds != null) parts.push(`${leader.rebounds}reb`);
+  if (leader.assists != null) parts.push(`${leader.assists}ast`);
+  return `${leader.name}: ${parts.join(" ")}`;
+}
+
+/** Parse minutes string "25:30" to a sortable number */
+function parseMinutes(min: string): number {
+  if (!min) return 0;
+  const parts = min.split(":");
+  return parseInt(parts[0] || "0", 10) + (parseInt(parts[1] || "0", 10) / 60);
+}
+
+/** Get the favored team name based on win prob */
+function getFavoredTeam(game: GameAnalysis): { name: string; prob: number } {
+  if (game.model.home_win_prob >= 0.5) {
+    return { name: game.home.team, prob: game.model.home_win_prob };
+  }
+  return { name: game.away.team, prob: 1 - game.model.home_win_prob };
 }
 
 // --- 3-State Toggle Button ---
@@ -179,16 +206,225 @@ function InjuryRow({
   );
 }
 
+// --- Game Status Badge ---
+
+function GameStatusBadge({ game }: { game: GameAnalysis }) {
+  const live = game.live;
+  if (!live) return null;
+
+  if (live.game_status === 1) {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded bg-[#2979FF]/15 text-[#2979FF] border border-[#2979FF]/30 font-medium">
+        SCHEDULED
+      </span>
+    );
+  }
+
+  if (live.game_status === 2) {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded bg-[#FF1744]/15 text-[#FF1744] border border-[#FF1744]/30 font-semibold">
+        <span className="relative flex h-2 w-2">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#FF1744] opacity-75" />
+          <span className="relative inline-flex rounded-full h-2 w-2 bg-[#FF1744]" />
+        </span>
+        LIVE {live.game_status_text}
+      </span>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded bg-[#64748b]/15 text-[#94a3b8] border border-[#64748b]/30 font-medium">
+      FINAL
+    </span>
+  );
+}
+
+// --- Live Score Display ---
+
+function LiveScoreDisplay({ game }: { game: GameAnalysis }) {
+  const live = game.live;
+  if (!live || live.game_status === 1) return null;
+
+  const homeWon = live.game_status === 3 && live.home_score > live.away_score;
+  const awayWon = live.game_status === 3 && live.away_score > live.home_score;
+
+  return (
+    <div className="flex flex-col items-center py-2">
+      <div className="flex items-center gap-3 text-xl font-mono font-bold">
+        <span className={awayWon ? "text-[#00C853]" : "text-[#e2e8f0]"}>
+          {game.away.team} {live.away_score}
+        </span>
+        <span className="text-[#64748b] text-base">—</span>
+        <span className={homeWon ? "text-[#00C853]" : "text-[#e2e8f0]"}>
+          {live.home_score} {game.home.team}
+        </span>
+      </div>
+      {live.game_status === 2 && live.game_clock && (
+        <span className="text-xs text-[#94a3b8] font-mono mt-0.5">
+          Q{live.period} {live.game_clock}
+        </span>
+      )}
+      {live.game_status === 3 && (
+        <span className="text-[10px] text-[#64748b] font-medium mt-0.5">
+          {homeWon ? `${game.home.team} WIN` : awayWon ? `${game.away.team} WIN` : "TIE"}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// --- Game Leaders ---
+
+function GameLeaders({ game }: { game: GameAnalysis }) {
+  const live = game.live;
+  if (!live || live.game_status === 1) return null;
+  const homeLine = formatLeader(live.home_leader);
+  const awayLine = formatLeader(live.away_leader);
+  if (!homeLine && !awayLine) return null;
+
+  return (
+    <div className="flex justify-center gap-4 text-[11px] text-[#94a3b8] font-mono">
+      {awayLine && <span>{awayLine}</span>}
+      {awayLine && homeLine && <span className="text-[#475569]">/</span>}
+      {homeLine && <span>{homeLine}</span>}
+    </div>
+  );
+}
+
+// --- Win Probability Bar (with explicit team names) ---
+
+function WinProbBar({ game }: { game: GameAnalysis }) {
+  const live = game.live;
+  const livePred = game.live_prediction;
+
+  let barProb = game.model.home_win_prob;
+  let showLiveProb = false;
+
+  if (livePred) {
+    if (live?.game_status === 3) {
+      barProb = livePred.home_won === true ? 1 : livePred.home_won === false ? 0 : barProb;
+    } else if (live?.game_status === 2) {
+      barProb = livePred.home_win_prob;
+    }
+    showLiveProb = true;
+  }
+
+  const homePct = Math.round(barProb * 100);
+  const awayPct = 100 - homePct;
+
+  // Determine favored team for pre-game label
+  const preGameFavored = game.model.home_win_prob >= 0.5
+    ? { name: game.home.team, prob: game.model.home_win_prob }
+    : { name: game.away.team, prob: 1 - game.model.home_win_prob };
+
+  return (
+    <div className="mb-3">
+      <div className="flex items-center justify-between text-[10px] text-[#94a3b8] mb-1">
+        <span className="font-semibold">{game.away.team} {awayPct}%</span>
+        <div className="flex items-center gap-3">
+          <span className="text-[#64748b]">
+            Pre-game: {preGameFavored.name} {formatPct(preGameFavored.prob)}
+          </span>
+          {showLiveProb && livePred && (
+            <span className="text-[#FF1744] font-semibold">
+              Live: {game.home.team} {formatPct(livePred.home_win_prob)}
+            </span>
+          )}
+        </div>
+        <span className="font-semibold">{game.home.team} {homePct}%</span>
+      </div>
+      <div className="h-2 rounded-full bg-[#1e293b] overflow-hidden flex">
+        <div
+          className="h-full bg-gradient-to-r from-[#2979FF] to-[#2979FF]/70 transition-all duration-500"
+          style={{ width: `${awayPct}%` }}
+        />
+        <div
+          className="h-full bg-gradient-to-r from-[#00C853]/70 to-[#00C853] transition-all duration-500"
+          style={{ width: `${homePct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+// --- Live Box Score ---
+
+function LiveBoxScore({ players, teamName }: { players: LivePlayerStats[]; teamName: string }) {
+  const sorted = [...players]
+    .sort((a, b) => parseMinutes(b.minutes) - parseMinutes(a.minutes))
+    .slice(0, 8);
+
+  if (sorted.length === 0) return null;
+
+  return (
+    <div className="mb-3">
+      <p className="text-[10px] text-[#64748b] font-semibold uppercase mb-1">{teamName}</p>
+      <table className="w-full text-[11px] font-mono">
+        <thead>
+          <tr className="text-[10px] text-[#64748b] uppercase">
+            <th className="text-left py-0.5 pr-2">Player</th>
+            <th className="text-right py-0.5 px-1">MIN</th>
+            <th className="text-right py-0.5 px-1">PTS</th>
+            <th className="text-right py-0.5 px-1">REB</th>
+            <th className="text-right py-0.5 px-1">AST</th>
+            <th className="text-right py-0.5 px-1">+/-</th>
+            <th className="text-right py-0.5 pl-1">FLS</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((p) => {
+            const foulTrouble = p.fouls >= 4;
+            return (
+              <tr
+                key={p.player_id || p.name}
+                className={`border-t border-[#1e293b] ${foulTrouble ? "bg-[#FFD600]/10" : ""}`}
+              >
+                <td className={`py-0.5 pr-2 text-left truncate max-w-[120px] ${foulTrouble ? "text-[#FFD600]" : "text-[#e2e8f0]"}`}>
+                  {p.name}
+                </td>
+                <td className="py-0.5 px-1 text-right text-[#94a3b8]">{p.minutes}</td>
+                <td className="py-0.5 px-1 text-right text-[#e2e8f0] font-semibold">{p.points}</td>
+                <td className="py-0.5 px-1 text-right text-[#94a3b8]">{p.rebounds}</td>
+                <td className="py-0.5 px-1 text-right text-[#94a3b8]">{p.assists}</td>
+                <td className={`py-0.5 px-1 text-right ${p.plus_minus > 0 ? "text-[#00C853]" : p.plus_minus < 0 ? "text-[#FF1744]" : "text-[#94a3b8]"}`}>
+                  {p.plus_minus > 0 ? "+" : ""}{p.plus_minus}
+                </td>
+                <td className={`py-0.5 pl-1 text-right ${foulTrouble ? "text-[#FFD600] font-bold" : "text-[#94a3b8]"}`}>
+                  {p.fouls}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // --- Main Component ---
 
-export default function GameCard({ game, injuryOverrides, onInjuryToggle }: GameCardProps) {
+export default function GameCard({ game, injuryOverrides, onInjuryToggle, forceExpanded }: GameCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // Allow parent to force-expand this card (e.g. when clicked from summary table)
+  useEffect(() => {
+    if (forceExpanded) setExpanded(true);
+  }, [forceExpanded]);
+  const [showBetModal, setShowBetModal] = useState(false);
+
+  const live = game.live;
+  const isLive = live?.game_status === 2;
+  const isFinal = live?.game_status === 3;
+  const isScheduled = !live || live.game_status === 1;
 
   const bestMarket = Object.entries(game.markets).reduce(
     (best, [, m]) => (m.edge.best_edge > (best?.edge.best_edge || 0) ? m : best),
     Object.values(game.markets)[0]
   );
+
+  // Determine favored team for display
+  const favored = getFavoredTeam(game);
 
   const handleCopyPrompt = async () => {
     const lines = [
@@ -198,7 +434,7 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
       `${game.home.team} (${game.home.record}): NRtg ${game.home.season_nrtg.toFixed(1)} → ${game.home.adjusted_nrtg.toFixed(1)} (${game.home.nrtg_delta >= 0 ? "+" : ""}${game.home.nrtg_delta.toFixed(1)})`,
       `${game.away.team} (${game.away.record}): NRtg ${game.away.season_nrtg.toFixed(1)} → ${game.away.adjusted_nrtg.toFixed(1)} (${game.away.nrtg_delta >= 0 ? "+" : ""}${game.away.nrtg_delta.toFixed(1)})`,
       ``,
-      `Model: Spread ${game.model.projected_spread.toFixed(1)}, Total ${game.model.projected_total.toFixed(1)}, ${game.home.team} win ${formatPct(game.model.home_win_prob)}`,
+      `Model: ${favored.name} favored at ${formatPct(favored.prob)}, Spread ${game.model.projected_spread.toFixed(1)}, Total ${game.model.projected_total.toFixed(1)}`,
       ``,
       `EDGES:`,
       ...Object.entries(game.markets).map(
@@ -212,11 +448,6 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
       setTimeout(() => setCopied(false), 2000);
     }
   };
-
-  const allInjuries = [
-    ...game.home.injuries.map((i) => ({ ...i, side: "home" as const })),
-    ...game.away.injuries.map((i) => ({ ...i, side: "away" as const })),
-  ];
 
   const homeQuestionable = game.home.injuries.filter((i) => i.status === "QUESTIONABLE");
   const awayQuestionable = game.away.injuries.filter((i) => i.status === "QUESTIONABLE");
@@ -241,11 +472,14 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
                 {game.model.confidence}
               </span>
             )}
+            <GameStatusBadge game={game} />
           </div>
           <div className="flex items-center gap-4">
-            <span className="text-xs text-[#64748b] font-mono">
-              {formatET(game.tipoff)} / {formatSGT(game.tipoff_sgt)}
-            </span>
+            {isScheduled && (
+              <span className="text-xs text-[#64748b] font-mono">
+                {formatET(game.tipoff)} / {formatSGT(game.tipoff_sgt)}
+              </span>
+            )}
             <svg
               className={`w-4 h-4 text-[#64748b] transition-transform ${expanded ? "rotate-180" : ""}`}
               fill="none" viewBox="0 0 24 24" stroke="currentColor"
@@ -254,6 +488,17 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
             </svg>
           </div>
         </div>
+
+        {/* Live Score (LIVE or FINAL) */}
+        {(isLive || isFinal) && (
+          <>
+            <LiveScoreDisplay game={game} />
+            <GameLeaders game={game} />
+          </>
+        )}
+
+        {/* Win Probability Bar */}
+        <WinProbBar game={game} />
 
         {/* Compact Ratings */}
         <div className="grid grid-cols-2 gap-4 mb-3">
@@ -317,8 +562,8 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
           </span>
         </div>
 
-        {/* Best edge badge */}
-        {bestMarket && (
+        {/* Best edge badge — hide for FINAL games */}
+        {bestMarket && !isFinal && (
           <div className="flex items-center gap-2">
             <span className={`text-xs px-2 py-0.5 rounded border font-semibold ${getVerdictBg(bestMarket.edge.verdict)}`}>
               {bestMarket.edge.verdict}
@@ -331,11 +576,36 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
             </span>
           </div>
         )}
+        {isFinal && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs px-2 py-0.5 rounded border border-[#64748b]/30 bg-[#64748b]/10 text-[#94a3b8] font-semibold">
+              RESOLVED
+            </span>
+            <span className="text-xs text-[#64748b]">Markets closed</span>
+          </div>
+        )}
       </div>
 
       {/* Expanded View */}
       {expanded && (
         <div className="border-t border-[#1e293b] p-4 bg-[#0d1320]">
+
+          {/* Live Box Score (LIVE games only) */}
+          {isLive && live && live.home_players.length > 0 && (
+            <div className="mb-4">
+              <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-2">
+                <span className="relative inline-flex h-2 w-2 mr-1.5 align-middle">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#FF1744] opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-[#FF1744]" />
+                </span>
+                Live Box Score
+              </h4>
+              <div className="grid grid-cols-2 gap-4">
+                <LiveBoxScore players={live.home_players} teamName={game.home.team} />
+                <LiveBoxScore players={live.away_players} teamName={game.away.team} />
+              </div>
+            </div>
+          )}
 
           {/* Injury Report with Toggles */}
           {(game.home.injuries.length > 0 || game.away.injuries.length > 0) && (
@@ -391,139 +661,165 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
             </div>
           )}
 
-          {/* Polymarket Live Prices */}
-          <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-3">
-            <span className="text-[#00C853]">●</span> Polymarket Live
-          </h4>
-          <div className="grid gap-2 mb-4">
-            {Object.entries(game.markets).map(([type, m]) => {
-              const homeLabel = m.home_label || game.home.team;
-              const awayLabel = m.away_label || game.away.team;
-              const homePrice = m.polymarket_home_yes || 0;
-              const awayPrice = m.polymarket_home_no || 0;
-              const bestSide = m.edge.best_side;
-              const pickLabel = getPickLabel(m, type);
-              const pickProb = getPickProb(m);
+          {/* Polymarket Live Prices — hidden for FINAL games */}
+          {!isFinal && (
+            <>
+              <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-3">
+                <span className="text-[#00C853]">●</span> Polymarket Live
+              </h4>
+              <div className="grid gap-2 mb-4">
+                {Object.entries(game.markets).map(([type, m]) => {
+                  const homeLabel = m.home_label || game.home.team;
+                  const awayLabel = m.away_label || game.away.team;
+                  const homePrice = m.polymarket_home_yes || 0;
+                  const awayPrice = m.polymarket_home_no || 0;
+                  const bestSide = m.edge.best_side;
+                  const pickLabel = getPickLabel(m, type);
+                  const pickProb = getPickProb(m);
 
-              return (
-                <div key={type} className="flex items-center gap-3 bg-[#1a2235] rounded-lg p-3">
-                  {/* Market type label */}
-                  <div className="w-20 shrink-0">
-                    <span className="text-xs font-semibold text-[#94a3b8] uppercase">{type}</span>
-                    {m.line != null && (
-                      <p className="text-[10px] text-[#64748b] font-mono">{formatLine(m.line, type)}</p>
-                    )}
-                  </div>
-
-                  {/* Two-button Polymarket style */}
-                  <div className="flex gap-2 flex-1">
-                    <div
-                      className={`flex-1 flex items-center justify-between rounded-md px-3 py-2 border transition-colors ${
-                        bestSide === homeLabel
-                          ? "border-[#00C853]/50 bg-[#00C853]/10"
-                          : "border-[#1e293b] bg-[#111827]"
-                      }`}
-                    >
-                      <span className={`text-sm font-medium ${bestSide === homeLabel ? "text-[#00C853]" : "text-[#e2e8f0]"}`}>
-                        {homeLabel}{type === "spread" && m.line != null ? ` ${formatLine(m.line, "spread")}` : ""}
-                      </span>
-                      <span className={`text-sm font-mono font-bold ${bestSide === homeLabel ? "text-[#00C853]" : "text-[#e2e8f0]"}`}>
-                        {Math.round(homePrice * 100)}¢
-                      </span>
-                    </div>
-
-                    <div
-                      className={`flex-1 flex items-center justify-between rounded-md px-3 py-2 border transition-colors ${
-                        bestSide === awayLabel
-                          ? "border-[#00C853]/50 bg-[#00C853]/10"
-                          : "border-[#1e293b] bg-[#111827]"
-                      }`}
-                    >
-                      <span className={`text-sm font-medium ${bestSide === awayLabel ? "text-[#00C853]" : "text-[#e2e8f0]"}`}>
-                        {awayLabel}{type === "spread" && m.line != null ? ` ${formatLine(m.line != null ? -m.line : null, "spread")}` : ""}
-                      </span>
-                      <span className={`text-sm font-mono font-bold ${bestSide === awayLabel ? "text-[#00C853]" : "text-[#e2e8f0]"}`}>
-                        {Math.round(awayPrice * 100)}¢
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Pick callout — clear recommendation */}
-                  <div className="w-44 shrink-0">
-                    <div className={`rounded-md px-3 py-1.5 text-right ${
-                      m.edge.verdict === "STRONG BUY" ? "bg-[#00C853]/10" :
-                      m.edge.verdict === "BUY" ? "bg-[#4CAF50]/10" :
-                      "bg-[#1e293b]/50"
-                    }`}>
-                      <div className="flex items-center justify-end gap-1.5">
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded border font-semibold ${getVerdictBg(m.edge.verdict)}`}>
-                          {m.edge.verdict}
-                        </span>
-                        <span className={`text-sm font-mono font-bold ${getVerdictColor(m.edge.verdict)}`}>
-                          {formatEdge(m.edge.best_edge)}
-                        </span>
+                  return (
+                    <div key={type} className="flex items-center gap-3 bg-[#1a2235] rounded-lg p-3">
+                      <div className="w-20 shrink-0">
+                        <span className="text-xs font-semibold text-[#94a3b8] uppercase">{type}</span>
+                        {m.line != null && (
+                          <p className="text-[10px] text-[#64748b] font-mono">{formatLine(m.line, type)}</p>
+                        )}
                       </div>
-                      <p className={`text-xs font-semibold mt-0.5 ${getVerdictColor(m.edge.verdict)}`}>
-                        {pickLabel}
-                      </p>
-                      <p className="text-[10px] text-[#64748b] font-mono">
-                        Model {formatPct(pickProb)} vs {formatPrice(getBestPrice(m))}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
 
-          {/* Edge Details Table */}
-          <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-2">
-            Edge Details
-          </h4>
-          <div className="overflow-x-auto mb-4">
-            <table className="w-full text-sm font-mono">
-              <thead>
-                <tr className="text-xs text-[#64748b] uppercase">
-                  <th className="text-left py-1 pr-3">Market</th>
-                  <th className="text-left py-1 pr-3">Pick</th>
-                  <th className="text-right py-1 pr-3">Poly</th>
-                  <th className="text-right py-1 pr-3">Model</th>
-                  <th className="text-right py-1 pr-3">Edge</th>
-                  <th className="text-right py-1 pr-3">EV/$</th>
-                  <th className="text-right py-1 pr-3">Kelly</th>
-                  <th className="text-left py-1">Verdict</th>
-                </tr>
-              </thead>
-              <tbody>
+                      <div className="flex gap-2 flex-1">
+                        <div
+                          className={`flex-1 flex items-center justify-between rounded-md px-3 py-2 border transition-colors ${
+                            bestSide === homeLabel
+                              ? "border-[#00C853]/50 bg-[#00C853]/10"
+                              : "border-[#1e293b] bg-[#111827]"
+                          }`}
+                        >
+                          <span className={`text-sm font-medium ${bestSide === homeLabel ? "text-[#00C853]" : "text-[#e2e8f0]"}`}>
+                            {homeLabel}{type === "spread" && m.line != null ? ` ${formatLine(m.line, "spread")}` : ""}
+                          </span>
+                          <span className={`text-sm font-mono font-bold ${bestSide === homeLabel ? "text-[#00C853]" : "text-[#e2e8f0]"}`}>
+                            {Math.round(homePrice * 100)}¢
+                          </span>
+                        </div>
+
+                        <div
+                          className={`flex-1 flex items-center justify-between rounded-md px-3 py-2 border transition-colors ${
+                            bestSide === awayLabel
+                              ? "border-[#00C853]/50 bg-[#00C853]/10"
+                              : "border-[#1e293b] bg-[#111827]"
+                          }`}
+                        >
+                          <span className={`text-sm font-medium ${bestSide === awayLabel ? "text-[#00C853]" : "text-[#e2e8f0]"}`}>
+                            {awayLabel}{type === "spread" && m.line != null ? ` ${formatLine(m.line != null ? -m.line : null, "spread")}` : ""}
+                          </span>
+                          <span className={`text-sm font-mono font-bold ${bestSide === awayLabel ? "text-[#00C853]" : "text-[#e2e8f0]"}`}>
+                            {Math.round(awayPrice * 100)}¢
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="w-44 shrink-0">
+                        <div className={`rounded-md px-3 py-1.5 text-right ${
+                          m.edge.verdict === "STRONG BUY" ? "bg-[#00C853]/10" :
+                          m.edge.verdict === "BUY" ? "bg-[#4CAF50]/10" :
+                          "bg-[#1e293b]/50"
+                        }`}>
+                          <div className="flex items-center justify-end gap-1.5">
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded border font-semibold ${getVerdictBg(m.edge.verdict)}`}>
+                              {m.edge.verdict}
+                            </span>
+                            <span className={`text-sm font-mono font-bold ${getVerdictColor(m.edge.verdict)}`}>
+                              {formatEdge(m.edge.best_edge)}
+                            </span>
+                          </div>
+                          <p className={`text-xs font-semibold mt-0.5 ${getVerdictColor(m.edge.verdict)}`}>
+                            {pickLabel}
+                          </p>
+                          <p className="text-[10px] text-[#64748b] font-mono">
+                            Model {formatPct(pickProb)} vs {formatPrice(getBestPrice(m))}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {/* FINAL: show resolved markets summary */}
+          {isFinal && (
+            <div className="mb-4 p-3 bg-[#1a2235]/50 rounded-lg border border-[#1e293b]">
+              <h4 className="text-xs font-semibold text-[#64748b] uppercase tracking-wider mb-2">
+                Markets — Resolved
+              </h4>
+              <div className="grid gap-1">
                 {Object.entries(game.markets).map(([type, m]) => (
-                  <tr key={type} className="border-t border-[#1e293b]">
-                    <td className="py-1.5 pr-3 text-[#e2e8f0] capitalize">{type}</td>
-                    <td className="py-1.5 pr-3 text-[#e2e8f0]">{getPickLabel(m, type)}</td>
-                    <td className="py-1.5 pr-3 text-right text-[#e2e8f0]">
-                      {formatPrice(getBestPrice(m))}
-                    </td>
-                    <td className="py-1.5 pr-3 text-right text-[#e2e8f0]">
-                      {formatPct(getPickProb(m))}
-                    </td>
-                    <td className={`py-1.5 pr-3 text-right font-semibold ${getVerdictColor(m.edge.verdict)}`}>
-                      {formatEdge(m.edge.best_edge)}
-                    </td>
-                    <td className="py-1.5 pr-3 text-right text-[#94a3b8]">
-                      ${getBestEv(m).toFixed(2)}
-                    </td>
-                    <td className="py-1.5 pr-3 text-right text-[#94a3b8]">
-                      {m.edge.suggested_bet_pct.toFixed(1)}%
-                    </td>
-                    <td className="py-1.5">
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded border font-semibold ${getVerdictBg(m.edge.verdict)}`}>
-                        {m.edge.verdict}
-                      </span>
-                    </td>
-                  </tr>
+                  <div key={type} className="flex items-center gap-3 text-xs text-[#64748b]">
+                    <span className="uppercase w-16">{type}</span>
+                    <span>{m.edge.best_side}</span>
+                    <span className="font-mono">{formatEdge(m.edge.best_edge)}</span>
+                    <span className="px-1.5 py-0.5 rounded bg-[#64748b]/10 border border-[#64748b]/20 text-[10px]">
+                      {m.edge.verdict}
+                    </span>
+                  </div>
                 ))}
-              </tbody>
-            </table>
-          </div>
+              </div>
+            </div>
+          )}
+
+          {/* Edge Details Table — hidden for FINAL */}
+          {!isFinal && (
+            <>
+              <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-2">
+                Edge Details
+              </h4>
+              <div className="overflow-x-auto mb-4">
+                <table className="w-full text-sm font-mono">
+                  <thead>
+                    <tr className="text-xs text-[#64748b] uppercase">
+                      <th className="text-left py-1 pr-3">Market</th>
+                      <th className="text-left py-1 pr-3">Pick</th>
+                      <th className="text-right py-1 pr-3">Poly</th>
+                      <th className="text-right py-1 pr-3">Model</th>
+                      <th className="text-right py-1 pr-3">Edge</th>
+                      <th className="text-right py-1 pr-3">EV/$</th>
+                      <th className="text-right py-1 pr-3">Kelly</th>
+                      <th className="text-left py-1">Verdict</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(game.markets).map(([type, m]) => (
+                      <tr key={type} className="border-t border-[#1e293b]">
+                        <td className="py-1.5 pr-3 text-[#e2e8f0] capitalize">{type}</td>
+                        <td className="py-1.5 pr-3 text-[#e2e8f0]">{getPickLabel(m, type)}</td>
+                        <td className="py-1.5 pr-3 text-right text-[#e2e8f0]">
+                          {formatPrice(getBestPrice(m))}
+                        </td>
+                        <td className="py-1.5 pr-3 text-right text-[#e2e8f0]">
+                          {formatPct(getPickProb(m))}
+                        </td>
+                        <td className={`py-1.5 pr-3 text-right font-semibold ${getVerdictColor(m.edge.verdict)}`}>
+                          {formatEdge(m.edge.best_edge)}
+                        </td>
+                        <td className="py-1.5 pr-3 text-right text-[#94a3b8]">
+                          ${getBestEv(m).toFixed(2)}
+                        </td>
+                        <td className="py-1.5 pr-3 text-right text-[#94a3b8]">
+                          {m.edge.suggested_bet_pct.toFixed(1)}%
+                        </td>
+                        <td className="py-1.5">
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded border font-semibold ${getVerdictBg(m.edge.verdict)}`}>
+                            {m.edge.verdict}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
 
           {/* Schedule Context */}
           <div className="grid grid-cols-2 gap-4 mt-4">
@@ -551,7 +847,7 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
             </div>
           </div>
 
-          {/* Model Details */}
+          {/* Model Details — now with explicit team names */}
           <div className="mt-4 p-3 bg-[#1a2235] rounded-md">
             <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-2">
               Model Projection
@@ -575,12 +871,14 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
               </div>
               <div>
                 <span className="text-xs text-[#64748b]">Win Prob</span>
-                <p className="text-[#e2e8f0] font-semibold">{formatPct(game.model.home_win_prob)}</p>
+                <p className="text-[#e2e8f0] font-semibold">
+                  {favored.name} {formatPct(favored.prob)}
+                </p>
               </div>
             </div>
           </div>
 
-          {/* Action buttons */}
+          {/* Action buttons — hide Log Bet for FINAL games */}
           <div className="flex gap-3 mt-4">
             <button
               onClick={handleCopyPrompt}
@@ -588,9 +886,17 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
             >
               {copied ? "Copied!" : "Copy AI Prompt"}
             </button>
-            <button className="px-3 py-1.5 text-xs rounded bg-[#1a2235] text-[#94a3b8] border border-[#1e293b] hover:border-[#334155] transition-colors font-medium">
-              Log Bet
-            </button>
+            {!isFinal && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowBetModal(true);
+                }}
+                className="px-3 py-1.5 text-xs rounded bg-[#00C853]/20 text-[#00C853] border border-[#00C853]/30 hover:bg-[#00C853]/30 transition-colors font-medium"
+              >
+                Log Bet
+              </button>
+            )}
           </div>
 
           {/* Data Quality */}
@@ -605,6 +911,15 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle }: Game
             )}
           </div>
         </div>
+      )}
+
+      {/* Bet Logging Modal */}
+      {showBetModal && (
+        <BetLogModal
+          game={game}
+          onClose={() => setShowBetModal(false)}
+          onBetPlaced={() => setShowBetModal(false)}
+        />
       )}
     </div>
   );

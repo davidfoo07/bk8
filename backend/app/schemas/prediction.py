@@ -16,6 +16,22 @@ class GamePrediction(BaseModel):
     confidence: str = "MEDIUM"
 
 
+class LivePrediction(BaseModel):
+    """Live-adjusted prediction that blends pre-game model with current score.
+
+    As the game progresses, the live score increasingly dominates over the
+    pre-game model rating. When the game is FINAL, this reflects the actual
+    result.
+    """
+    home_win_prob: float  # Blended live win probability
+    pre_game_home_win_prob: float  # Original pre-game model for comparison
+    projected_final_margin: float  # Expected final margin from home perspective
+    live_margin: int  # Current score difference (home - away)
+    time_remaining_pct: float  # 1.0 = full game, 0.0 = game over
+    is_final: bool = False  # True when game is decided
+    home_won: bool | None = None  # Only set when is_final=True
+
+
 class DataQuality(BaseModel):
     """Data quality indicators for a game analysis."""
     ratings_freshness: str = "FRESH"  # FRESH, STALE, MISSING

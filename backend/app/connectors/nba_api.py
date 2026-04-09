@@ -146,6 +146,28 @@ class NBAApiConnector(BaseConnector):
         data = await self.fetch("/scoreboardv3", params=params)
         return data.get("scoreboard", {}).get("games", [])
 
+    async def get_live_boxscore(self, nba_game_id: str) -> dict[str, Any]:
+        """Fetch live box score for a game in progress.
+
+        Uses boxscoretraditionalv3 which returns per-player stats during live games:
+        minutes, points, rebounds, assists, steals, blocks, turnovers, fouls,
+        +/-, FG%, 3P%, FT%.
+
+        Args:
+            nba_game_id: The real NBA 10-digit game ID (e.g. "0022501161"),
+                         NOT our synthesized "2026-04-09_MEM_DEN" format.
+        """
+        params = {
+            "GameID": nba_game_id,
+            "StartPeriod": 0,
+            "EndPeriod": 0,
+            "StartRange": 0,
+            "EndRange": 0,
+            "RangeType": 0,
+        }
+        data = await self.fetch("/boxscoretraditionalv3", params=params)
+        return data
+
     async def get_standings(self, season: str = "2025-26") -> list[dict[str, Any]]:
         params = {
             "LeagueID": "00", "Season": season, "SeasonType": "Regular Season",

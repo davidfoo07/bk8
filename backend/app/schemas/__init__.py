@@ -1,9 +1,16 @@
 """Pydantic schemas package."""
 
 from app.schemas.bet import BetCreate, BetHistoryResponse, BetResponse
-from app.schemas.game import DailyAnalysis, GameAnalysis, TeamGameData, TopEdge
+from app.schemas.game import (
+    DailyAnalysis,
+    GameAnalysis,
+    LiveGameState,
+    LivePlayerStats,
+    TeamGameData,
+    TopEdge,
+)
 from app.schemas.market import EdgeResult, MarketEdge, MarketPrice
-from app.schemas.prediction import DataQuality, GamePrediction
+from app.schemas.prediction import DataQuality, GamePrediction, LivePrediction
 from app.schemas.team import (
     AdjustedRatings,
     InjurySchema,
@@ -25,6 +32,9 @@ __all__ = [
     "GameAnalysis",
     "GamePrediction",
     "InjurySchema",
+    "LiveGameState",
+    "LivePlayerStats",
+    "LivePrediction",
     "MarketEdge",
     "MarketPrice",
     "PlayerAbsence",

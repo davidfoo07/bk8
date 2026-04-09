@@ -12,6 +12,7 @@ Flow:
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -27,9 +28,9 @@ from app.connectors.injuries import InjuryFeedConnector
 from app.connectors.nba_api import NBAApiConnector
 from app.connectors.pbpstats import PBPStatsConnector
 from app.connectors.polymarket import PolymarketConnector
-from app.schemas.game import DailyAnalysis, GameAnalysis, TeamGameData, TopEdge
+from app.schemas.game import DailyAnalysis, GameAnalysis, LiveGameState, LivePlayerStats, TeamGameData, TopEdge
 from app.schemas.market import EdgeResult, MarketEdge
-from app.schemas.prediction import DataQuality, GamePrediction
+from app.schemas.prediction import DataQuality, GamePrediction, LivePrediction
 from app.schemas.team import InjurySchema, PlayerAbsence, ScheduleContext
 from app.services.prediction_store import save_predictions
 
@@ -308,7 +309,7 @@ async def _fetch_todays_games(
     game_date: date, warnings: list[str]
 ) -> list[dict[str, Any]]:
     cache_key = f"schedule_{game_date.isoformat()}"
-    cached = _cache.get(cache_key, ttl_seconds=600)
+    cached = _cache.get(cache_key, ttl_seconds=120)  # 120s TTL — refreshes every 2 min for live scores
     if cached is not None:
         logger.info(f"Using cached schedule ({len(cached)} games)")
         return cached
@@ -335,6 +336,45 @@ async def _fetch_todays_games(
             game_id = f"{game_date.isoformat()}_{away_team}_{home_team}"
             venue = g.get("arenaName", "") or g.get("arena", {}).get("arenaName", "") or ""
 
+            # Live game state from scoreboardv3
+            game_status = g.get("gameStatus", 1)
+            game_status_text = g.get("gameStatusText", "")
+            period = g.get("period", 0)
+            game_clock_raw = g.get("gameClock", "") or ""
+            nba_game_id = g.get("gameId", "")
+
+            # Parse ISO 8601 game clock "PT05M47.00S" → "5:47"
+            game_clock = _parse_game_clock(game_clock_raw)
+
+            home_team_data = g.get("homeTeam", {})
+            away_team_data = g.get("awayTeam", {})
+            home_score = home_team_data.get("score", 0) or 0
+            away_score = away_team_data.get("score", 0) or 0
+
+            # Quarter-by-quarter scores
+            home_periods = [
+                {"period": p.get("period", 0), "score": p.get("score", 0)}
+                for p in (home_team_data.get("periods") or [])
+            ]
+            away_periods = [
+                {"period": p.get("period", 0), "score": p.get("score", 0)}
+                for p in (away_team_data.get("periods") or [])
+            ]
+
+            # Game leaders
+            home_leader = {}
+            away_leader = {}
+            leaders = g.get("gameLeaders", {})
+            if leaders:
+                hl = leaders.get("homeLeaders", {})
+                al = leaders.get("awayLeaders", {})
+                if hl.get("name"):
+                    home_leader = {"name": hl["name"], "points": hl.get("points", 0),
+                                   "rebounds": hl.get("rebounds", 0), "assists": hl.get("assists", 0)}
+                if al.get("name"):
+                    away_leader = {"name": al["name"], "points": al.get("points", 0),
+                                   "rebounds": al.get("rebounds", 0), "assists": al.get("assists", 0)}
+
             games.append({
                 "game_id": game_id,
                 "home_team": home_team,
@@ -342,8 +382,20 @@ async def _fetch_todays_games(
                 "tipoff": tipoff,
                 "venue": venue,
                 "raw": g,
+                # Live game state
+                "game_status": game_status,
+                "game_status_text": game_status_text,
+                "period": period,
+                "game_clock": game_clock,
+                "nba_game_id": nba_game_id,
+                "home_score": home_score,
+                "away_score": away_score,
+                "home_periods": home_periods,
+                "away_periods": away_periods,
+                "home_leader": home_leader,
+                "away_leader": away_leader,
             })
-        _cache.set(cache_key, games)
+        _cache.set(cache_key, games)  # 120s TTL — refreshes every 2 min for live scores
         return games
     except Exception as e:
         logger.error(f"Failed to fetch today's games: {e}")
@@ -363,6 +415,18 @@ def _resolve_team_abbr(game_data: dict, team_key: str) -> str | None:
         if team_id and team_id in NBA_TEAM_ID_TO_ABBR:
             return NBA_TEAM_ID_TO_ABBR[team_id]
     return None
+
+
+def _parse_game_clock(raw: str) -> str:
+    """Parse ISO 8601 duration 'PT05M47.00S' → '5:47'. Returns '' if unparseable."""
+    if not raw:
+        return ""
+    m = re.match(r"PT(\d+)M([\d.]+)S", raw)
+    if m:
+        minutes = int(m.group(1))
+        seconds = int(float(m.group(2)))
+        return f"{minutes}:{seconds:02d}"
+    return raw.strip()
 
 
 # ─── Step 2: Fetch Supporting Data ─────────────────────────────────
@@ -578,6 +642,167 @@ async def _fetch_player_metrics(
     return result
 
 
+# ─── Live Box Score Fetching ────────────────────────────────────────
+
+async def _fetch_live_boxscore(nba_game_id: str) -> tuple[list[LivePlayerStats], list[LivePlayerStats]]:
+    """Fetch live per-player box score for an in-progress game.
+    Returns (home_players, away_players)."""
+    if not nba_game_id:
+        return [], []
+
+    cache_key = f"boxscore_{nba_game_id}"
+    cached = _cache.get(cache_key, ttl_seconds=60)  # 60s cache for live data
+    if cached is not None:
+        return cached
+
+    nba = NBAApiConnector()
+    try:
+        data = await nba.get_live_boxscore(nba_game_id)
+
+        # boxscoretraditionalv3 returns: { "boxScoreTraditional": { "homeTeam": { "players": [...] }, "awayTeam": { "players": [...] } } }
+        box = data.get("boxScoreTraditional", {})
+
+        home_players = _parse_boxscore_players(box.get("homeTeam", {}).get("players", []))
+        away_players = _parse_boxscore_players(box.get("awayTeam", {}).get("players", []))
+
+        result = (home_players, away_players)
+        _cache.set(cache_key, result)
+        logger.info(f"📊 Live boxscore for {nba_game_id}: {len(home_players)} home, {len(away_players)} away players")
+        return result
+    except Exception as e:
+        logger.warning(f"Failed to fetch boxscore for {nba_game_id}: {e}")
+        return [], []
+    finally:
+        await nba.close()
+
+
+def _parse_boxscore_players(players_raw: list[dict]) -> list[LivePlayerStats]:
+    """Parse boxscoretraditionalv3 player data into LivePlayerStats."""
+    result = []
+    for p in players_raw:
+        stats = p.get("statistics", {})
+        name_parts = [p.get("firstName", ""), p.get("familyName", "")]
+        name = " ".join(n for n in name_parts if n).strip() or p.get("name", "Unknown")
+
+        result.append(LivePlayerStats(
+            name=name,
+            player_id=str(p.get("personId", "")),
+            position=p.get("position", "") or "",
+            team=p.get("teamTricode", ""),
+            minutes=stats.get("minutes", "0:00") or "0:00",
+            points=int(stats.get("points", 0) or 0),
+            rebounds=int(stats.get("reboundsTotal", 0) or 0),
+            assists=int(stats.get("assists", 0) or 0),
+            steals=int(stats.get("steals", 0) or 0),
+            blocks=int(stats.get("blocks", 0) or 0),
+            turnovers=int(stats.get("turnovers", 0) or 0),
+            fouls=int(stats.get("foulsPersonal", 0) or 0),
+            plus_minus=int(stats.get("plusMinusPoints", 0) or 0),
+            fg_pct=float(stats.get("fieldGoalsPercentage", 0) or 0),
+            three_pct=float(stats.get("threePointersPercentage", 0) or 0),
+            ft_pct=float(stats.get("freeThrowsPercentage", 0) or 0),
+        ))
+
+    # Sort by minutes played descending
+    result.sort(key=lambda p: _minutes_to_float(p.minutes), reverse=True)
+    return result
+
+
+def _minutes_to_float(mins_str: str) -> float:
+    """Convert 'MM:SS' string to float minutes."""
+    try:
+        parts = mins_str.split(":")
+        return float(parts[0]) + float(parts[1]) / 60 if len(parts) == 2 else float(parts[0])
+    except (ValueError, IndexError):
+        return 0.0
+
+
+# ─── Live Prediction ────────────────────────────────────────────────
+
+def _calculate_live_prediction(
+    pre_game_prediction: GamePrediction,
+    game_status: int,
+    home_score: int,
+    away_score: int,
+    period: int,
+    game_clock: str,
+) -> LivePrediction | None:
+    """Blend pre-game model with live score for an in-game or final prediction.
+    
+    As time_remaining → 0, the live score dominates entirely.
+    As time_remaining → 48min (just started), the pre-game model dominates.
+    """
+    if game_status == 1:
+        return None  # Not started, no live prediction needed
+
+    live_margin = home_score - away_score
+    pre_game_prob = pre_game_prediction.home_win_prob
+    projected_margin = pre_game_prediction.projected_spread  # negative = home favored
+    # projected_spread is from home perspective, negative means home favored
+    # So for margin calculation: home expected margin = -projected_spread
+    pre_game_margin = -projected_margin
+
+    if game_status == 3:
+        # Game is FINAL
+        home_won = home_score > away_score
+        return LivePrediction(
+            home_win_prob=1.0 if home_won else (0.5 if home_score == away_score else 0.0),
+            pre_game_home_win_prob=pre_game_prob,
+            projected_final_margin=float(live_margin),
+            live_margin=live_margin,
+            time_remaining_pct=0.0,
+            is_final=True,
+            home_won=home_won,
+        )
+
+    # Game is LIVE (status == 2)
+    # Calculate time remaining
+    MINUTES_PER_PERIOD = 12.0
+    TOTAL_REG_MINUTES = 48.0
+
+    # Parse clock
+    clock_minutes = 0.0
+    if game_clock:
+        parts = game_clock.split(":")
+        try:
+            clock_minutes = float(parts[0]) + float(parts[1]) / 60 if len(parts) == 2 else float(parts[0])
+        except (ValueError, IndexError):
+            clock_minutes = 0.0
+
+    if period <= 4:
+        # Regulation
+        periods_remaining_after_current = max(0, 4 - period)
+        minutes_remaining = periods_remaining_after_current * MINUTES_PER_PERIOD + clock_minutes
+        time_remaining_pct = max(0.01, minutes_remaining / TOTAL_REG_MINUTES)
+    else:
+        # Overtime — very little time, live score dominates
+        minutes_remaining = clock_minutes  # Just what's left in this OT period
+        time_remaining_pct = max(0.01, minutes_remaining / TOTAL_REG_MINUTES)
+
+    # Blend formula:
+    # projected_remaining_margin = pre_game expected margin * time_remaining_pct
+    # live_projected_final_margin = current_margin + projected_remaining_margin
+    pre_game_remaining_margin = pre_game_margin * time_remaining_pct
+    live_projected_final_margin = live_margin + pre_game_remaining_margin
+
+    # Win probability via logistic, with variance shrinking as time passes
+    GAME_STD_DEV = 12.0
+    adjusted_std = GAME_STD_DEV * math.sqrt(time_remaining_pct)
+    adjusted_std = max(adjusted_std, 0.5)  # Floor to avoid division issues
+
+    live_win_prob = 1.0 / (1.0 + math.exp(-live_projected_final_margin / adjusted_std))
+
+    return LivePrediction(
+        home_win_prob=round(live_win_prob, 4),
+        pre_game_home_win_prob=pre_game_prob,
+        projected_final_margin=round(live_projected_final_margin, 1),
+        live_margin=live_margin,
+        time_remaining_pct=round(time_remaining_pct, 4),
+        is_final=False,
+        home_won=None,
+    )
+
+
 # ─── Step 3: Process Single Game ───────────────────────────────────
 
 async def _process_single_game(
@@ -596,6 +821,8 @@ async def _process_single_game(
     game_id = game_raw["game_id"]
     tipoff: datetime | None = game_raw.get("tipoff")
     venue = game_raw.get("venue", "")
+    game_status = game_raw.get("game_status", 1)
+    nba_game_id = game_raw.get("nba_game_id", "")
 
     logger.info(f"Processing {away_abbr} @ {home_abbr}")
 
@@ -657,7 +884,7 @@ async def _process_single_game(
     # Polymarket prices
     poly_prices = _find_polymarket_prices(away_abbr, home_abbr, game_date, polymarket_event)
 
-    # Prediction model
+    # Prediction model (V2: pace-adjusted, motivation-aware, date-aware)
     prediction = predict_game(
         home_adj_nrtg=home_adj.adjusted_nrtg, away_adj_nrtg=away_adj.adjusted_nrtg,
         home_adj_ortg=home_adj.adjusted_ortg, home_adj_drtg=home_adj.adjusted_drtg,
@@ -665,6 +892,11 @@ async def _process_single_game(
         home_schedule_mod=home_sched_mod, away_schedule_mod=away_sched_mod,
         spread_line=poly_prices.get("spread_line"),
         total_line=poly_prices.get("total_line"),
+        home_pace=home_ratings.get("pace", 102.0),
+        away_pace=away_ratings.get("pace", 102.0),
+        home_motivation=home_motivation.motivation_flag,
+        away_motivation=away_motivation.motivation_flag,
+        game_date=game_date,
     )
 
     # Team nicknames for labels
@@ -675,7 +907,7 @@ async def _process_single_game(
     markets: dict[str, MarketEdge] = {}
 
     ml_price = poly_prices.get("moneyline_home_yes")
-    if ml_price is not None:
+    if ml_price is not None and _is_live_price(ml_price):
         ml_edge = calculate_edge(prediction.home_win_prob, ml_price)
         # Replace YES/NO with team names in the edge result
         ml_edge_named = EdgeResult(
@@ -695,9 +927,11 @@ async def _process_single_game(
             model_probability=prediction.home_win_prob,
             edge=ml_edge_named,
         )
+    elif ml_price is not None:
+        logger.info(f"  ML market settled (price={ml_price:.3f}), skipping edge calc for {away_abbr}@{home_abbr}")
 
     spread_price = poly_prices.get("spread_home_yes")
-    if spread_price is not None:
+    if spread_price is not None and _is_live_price(spread_price):
         spread_cover_prob = prediction.spread_cover_prob
         spread_edge = calculate_edge(spread_cover_prob, spread_price)
         spread_edge_named = EdgeResult(
@@ -718,9 +952,11 @@ async def _process_single_game(
             model_probability=spread_cover_prob,
             edge=spread_edge_named,
         )
+    elif spread_price is not None:
+        logger.info(f"  Spread market settled (price={spread_price:.3f}), skipping edge calc for {away_abbr}@{home_abbr}")
 
     total_price = poly_prices.get("total_over_yes")
-    if total_price is not None:
+    if total_price is not None and _is_live_price(total_price):
         over_prob = prediction.over_prob
         total_edge = calculate_edge(over_prob, total_price)
         total_edge_named = EdgeResult(
@@ -741,6 +977,8 @@ async def _process_single_game(
             model_probability=over_prob,
             edge=total_edge_named,
         )
+    elif total_price is not None:
+        logger.info(f"  Total market settled (price={total_price:.3f}), skipping edge calc for {away_abbr}@{home_abbr}")
 
     # Injury schemas
     home_injury_schemas = [
@@ -772,6 +1010,40 @@ async def _process_single_game(
         warnings=warnings[:5],
     )
 
+    # Live game state
+    live_state = LiveGameState(
+        game_status=game_raw.get("game_status", 1),
+        game_status_text=game_raw.get("game_status_text", ""),
+        period=game_raw.get("period", 0),
+        game_clock=game_raw.get("game_clock", ""),
+        home_score=game_raw.get("home_score", 0),
+        away_score=game_raw.get("away_score", 0),
+        nba_game_id=game_raw.get("nba_game_id", ""),
+        home_periods=game_raw.get("home_periods", []),
+        away_periods=game_raw.get("away_periods", []),
+        home_leader=game_raw.get("home_leader", {}),
+        away_leader=game_raw.get("away_leader", {}),
+    )
+
+    # Live box score for in-progress games
+    if game_raw.get("game_status") == 2 and nba_game_id:
+        try:
+            home_players, away_players = await _fetch_live_boxscore(nba_game_id)
+            live_state.home_players = home_players
+            live_state.away_players = away_players
+        except Exception as e:
+            logger.warning(f"Boxscore fetch failed for {nba_game_id}: {e}")
+
+    # Live-adjusted prediction
+    live_pred = _calculate_live_prediction(
+        pre_game_prediction=prediction,
+        game_status=game_raw.get("game_status", 1),
+        home_score=game_raw.get("home_score", 0),
+        away_score=game_raw.get("away_score", 0),
+        period=game_raw.get("period", 0),
+        game_clock=game_raw.get("game_clock", ""),
+    )
+
     return GameAnalysis(
         game_id=game_id, tipoff=tipoff, tipoff_sgt=tipoff_sgt, venue=venue,
         home=TeamGameData(
@@ -794,7 +1066,11 @@ async def _process_single_game(
             adjusted_nrtg=away_adj.adjusted_nrtg, nrtg_delta=away_adj.nrtg_delta,
             injuries=away_injury_schemas, schedule=away_schedule,
         ),
-        model=prediction, markets=markets, data_quality=data_quality,
+        model=prediction,
+        live=live_state,
+        live_prediction=live_pred,
+        markets=markets,
+        data_quality=data_quality,
     )
 
 
@@ -969,6 +1245,16 @@ def _pick_best_total(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
     return candidates[0] if candidates else None
 
 
+def _is_live_price(price: float) -> bool:
+    """Check if a Polymarket price represents an active (unsettled) market.
+
+    Markets at ≤2¢ or ≥98¢ are effectively settled/resolved — the outcome
+    is already known. Calculating edges against these is nonsensical and
+    produces misleading STRONG BUY signals on games already finished.
+    """
+    return 0.02 < price < 0.98
+
+
 # ─── Helper Functions ───────────────────────────────────────────────
 
 def _build_player_absences(
@@ -1124,8 +1410,9 @@ def _extract_top_edges(games: list[GameAnalysis]) -> list[TopEdge]:
                     price = market.polymarket_home_no or 0
 
                 edges.append(TopEdge(
-                    game=game_label, market=market_type, selection=selection,
-                    price=price, model_prob=market.model_probability,
+                    game=game_label, game_id=game.game_id, market=market_type,
+                    selection=selection, price=price,
+                    model_prob=market.model_probability,
                     edge=market.edge.best_edge, verdict=market.edge.verdict,
                 ))
     edges.sort(key=lambda e: e.edge, reverse=True)

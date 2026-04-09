@@ -124,7 +124,6 @@ class Game(Base):
     away_team_rel: Mapped["Team"] = relationship(foreign_keys=[away_team])
     markets: Mapped[list["PolymarketMarket"]] = relationship(back_populates="game")
     predictions: Mapped[list["Prediction"]] = relationship(back_populates="game")
-    bets: Mapped[list["Bet"]] = relationship(back_populates="game")
 
 
 class PolymarketMarket(Base):
@@ -169,26 +168,25 @@ class Prediction(Base):
 
 
 class Bet(Base):
+    """Bet tracking — no FK on game_id since pipeline doesn't persist games to DB."""
     __tablename__ = "bets"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    game_id: Mapped[str] = mapped_column(ForeignKey("games.id"))
-    prediction_id: Mapped[int | None] = mapped_column(ForeignKey("predictions.id"))
+    game_id: Mapped[str] = mapped_column(String(50), nullable=False)  # No FK — pipeline is in-memory
+    prediction_id: Mapped[int | None] = mapped_column(Integer)  # No FK
     market_type: Mapped[str | None] = mapped_column(String(15))
-    selection: Mapped[str | None] = mapped_column(String(100))
+    selection: Mapped[str | None] = mapped_column(String(200))
     side: Mapped[str | None] = mapped_column(String(3))  # YES | NO
     entry_price: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
     model_probability: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
     edge_at_entry: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
     amount_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
     kelly_fraction: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    notes: Mapped[str | None] = mapped_column(Text)
     result: Mapped[str | None] = mapped_column(String(5))  # WIN | LOSS | PUSH
     pnl: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
     placed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-    game: Mapped["Game"] = relationship(back_populates="bets")
-    prediction: Mapped["Prediction | None"] = relationship()
 
 
 class ValidationLog(Base):
