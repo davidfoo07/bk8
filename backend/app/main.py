@@ -23,6 +23,18 @@ async def _auto_migrate() -> None:
     never drops or renames. Safe to run on every startup.
     """
     migrations: list[str] = [
+        # 2026-04-10: notes column for bets
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'bets' AND column_name = 'notes'
+            ) THEN
+                ALTER TABLE bets ADD COLUMN notes TEXT;
+            END IF;
+        END $$;
+        """,
         # 2026-04-10: system_aligned flag for bet tracking
         """
         DO $$
@@ -36,10 +48,17 @@ async def _auto_migrate() -> None:
             END IF;
         END $$;
         """,
+        # 2026-04-10: widen selection from VARCHAR(100) to VARCHAR(200)
+        """
+        ALTER TABLE bets ALTER COLUMN selection TYPE VARCHAR(200);
+        """,
     ]
     async with engine.begin() as conn:
         for sql in migrations:
-            await conn.execute(text(sql))
+            try:
+                await conn.execute(text(sql))
+            except Exception as e:
+                logger.warning(f"Auto-migrate statement skipped: {e}")
     logger.info("Auto-migration check complete")
 
 
