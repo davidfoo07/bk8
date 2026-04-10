@@ -940,7 +940,17 @@ async def _process_single_game(
             edge=ml_edge_named,
         )
     elif ml_price is not None:
-        logger.info(f"  ML market settled (price={ml_price:.3f}), skipping edge calc for {away_abbr}@{home_abbr}")
+        logger.info(f"  ML market settled (price={ml_price:.3f}), storing line only for {away_abbr}@{home_abbr}")
+        markets["moneyline"] = MarketEdge(
+            market_type="moneyline",
+            polymarket_home_yes=ml_price,
+            polymarket_home_no=round(1.0 - ml_price, 3),
+            home_label=home_nick,
+            away_label=away_nick,
+            model_probability=prediction.home_win_prob,
+            edge=EdgeResult(yes_edge=0.0, no_edge=0.0, yes_ev=0.0, no_ev=0.0,
+                            best_side="SETTLED", best_edge=0.0, verdict="SETTLED"),
+        )
 
     spread_price = poly_prices.get("spread_home_yes")
     if spread_price is not None and _is_live_price(spread_price):
@@ -965,7 +975,18 @@ async def _process_single_game(
             edge=spread_edge_named,
         )
     elif spread_price is not None:
-        logger.info(f"  Spread market settled (price={spread_price:.3f}), skipping edge calc for {away_abbr}@{home_abbr}")
+        logger.info(f"  Spread market settled (price={spread_price:.3f}), storing line only for {away_abbr}@{home_abbr}")
+        markets["spread"] = MarketEdge(
+            market_type="spread",
+            line=poly_prices.get("spread_line"),
+            polymarket_home_yes=spread_price,
+            polymarket_home_no=round(1.0 - spread_price, 3),
+            home_label=home_nick,
+            away_label=away_nick,
+            model_probability=prediction.spread_cover_prob,
+            edge=EdgeResult(yes_edge=0.0, no_edge=0.0, yes_ev=0.0, no_ev=0.0,
+                            best_side="SETTLED", best_edge=0.0, verdict="SETTLED"),
+        )
 
     total_price = poly_prices.get("total_over_yes")
     if total_price is not None and _is_live_price(total_price):
@@ -990,7 +1011,18 @@ async def _process_single_game(
             edge=total_edge_named,
         )
     elif total_price is not None:
-        logger.info(f"  Total market settled (price={total_price:.3f}), skipping edge calc for {away_abbr}@{home_abbr}")
+        logger.info(f"  Total market settled (price={total_price:.3f}), storing line only for {away_abbr}@{home_abbr}")
+        markets["total"] = MarketEdge(
+            market_type="total",
+            line=poly_prices.get("total_line"),
+            polymarket_home_yes=total_price,
+            polymarket_home_no=round(1.0 - total_price, 3),
+            home_label="Over",
+            away_label="Under",
+            model_probability=prediction.over_prob,
+            edge=EdgeResult(yes_edge=0.0, no_edge=0.0, yes_ev=0.0, no_ev=0.0,
+                            best_side="SETTLED", best_edge=0.0, verdict="SETTLED"),
+        )
 
     # Injury schemas
     home_injury_schemas = [

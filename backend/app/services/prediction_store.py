@@ -35,15 +35,20 @@ def _count_markets(data: dict) -> int:
     return total
 
 
+def _game_market_count(game: dict) -> int:
+    """Count markets for a single game."""
+    return len(game.get("markets", {}))
+
+
 def save_predictions(analysis: DailyAnalysis) -> Path:
     """Save a DailyAnalysis to a dated JSON file.
 
-    Protection logic:
-      - If no existing file → save unconditionally.
-      - If existing file has MORE markets than the new data → skip the overwrite.
-        This prevents post-game pipeline runs (where Polymarket delisted settled
-        markets) from clobbering the pre-game snapshot that had full edge data.
-      - If equal or fewer markets → overwrite (new data is richer or same).
+    Per-game merge logic:
+      - For each game, keep whichever version (existing vs new) has MORE markets.
+      - This handles: initial save has 2/6 games with markets, later run has 5/6.
+        Result: all 6 games get the best available market data.
+      - Global fallback: if existing has strictly more total markets AND more games,
+        skip entirely (e.g. post-game run where Polymarket delisted everything).
     """
     _ensure_dir()
     filepath = PREDICTIONS_DIR / f"{analysis.date.isoformat()}.json"
@@ -58,13 +63,21 @@ def save_predictions(analysis: DailyAnalysis) -> Path:
             existing_data = json.loads(filepath.read_text(encoding="utf-8"))
             existing_market_count = _count_markets(existing_data)
 
-            if existing_market_count > new_market_count:
-                logger.info(
-                    f"🛡️ Skipping save for {analysis.date}: existing file has "
-                    f"{existing_market_count} markets vs new {new_market_count} "
-                    f"(protecting pre-game snapshot)"
-                )
-                return filepath
+            # Per-game merge: for each game, pick the version with more markets
+            if existing_market_count > 0:
+                merged = _merge_predictions(existing_data, new_data)
+                merged_market_count = _count_markets(merged)
+
+                if merged_market_count > new_market_count:
+                    logger.info(
+                        f"🔀 Merged predictions for {analysis.date}: "
+                        f"existing had {existing_market_count} markets, "
+                        f"new has {new_market_count}, merged = {merged_market_count}"
+                    )
+                    merged["saved_at"] = datetime.now().isoformat()
+                    filepath.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+                    return filepath
+
         except Exception:
             pass  # Corrupted file — overwrite it
 
@@ -74,6 +87,55 @@ def save_predictions(analysis: DailyAnalysis) -> Path:
         f"({analysis.games_count} games, {new_market_count} markets)"
     )
     return filepath
+
+
+def _merge_predictions(existing: dict, new: dict) -> dict:
+    """Merge two prediction snapshots, keeping the richer version per game.
+
+    For each game_id:
+      - If only in one snapshot → keep it
+      - If in both → keep whichever has more markets
+        (tie-break: prefer new data since it has fresher model output)
+    """
+    # Index existing games by game_id
+    existing_games: dict[str, dict] = {}
+    for game in existing.get("games", []):
+        gid = game.get("game_id", "")
+        if gid:
+            existing_games[gid] = game
+
+    # Build merged game list from new data, upgrading markets from existing where better
+    merged_games = []
+    seen_ids = set()
+
+    for game in new.get("games", []):
+        gid = game.get("game_id", "")
+        seen_ids.add(gid)
+
+        old_game = existing_games.get(gid)
+        if old_game and _game_market_count(old_game) > _game_market_count(game):
+            # Existing has richer markets — use existing game but update model fields from new
+            merged_game = dict(old_game)
+            # Keep fresh model predictions from the new run
+            merged_game["model"] = game.get("model", old_game.get("model"))
+            merged_game["data_quality"] = game.get("data_quality", old_game.get("data_quality"))
+            merged_games.append(merged_game)
+        else:
+            # New has equal or more markets — use new
+            merged_games.append(game)
+
+    # Add any games only in existing (shouldn't normally happen, but safety)
+    for gid, game in existing_games.items():
+        if gid not in seen_ids:
+            merged_games.append(game)
+
+    # Build merged result using new data as base (keeps date, top_edges, etc.)
+    result = dict(new)
+    result["games"] = merged_games
+    result["games_count"] = len(merged_games)
+    # Recalculate top_edges would be ideal, but we keep new's top_edges
+    # since they reflect the latest model run
+    return result
 
 
 def load_predictions(game_date: date) -> DailyAnalysis | None:
