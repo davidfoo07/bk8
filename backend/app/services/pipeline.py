@@ -33,6 +33,7 @@ from app.schemas.market import EdgeResult, MarketEdge
 from app.schemas.prediction import DataQuality, GamePrediction, LivePrediction
 from app.schemas.team import InjurySchema, PlayerAbsence, ScheduleContext
 from app.services.prediction_store import save_predictions
+from app.services.market_store import save_market_snapshots
 
 
 # ─── NBA Team ID ↔ Abbreviation maps ───────────────────────────────
@@ -237,6 +238,12 @@ async def run_daily_pipeline(
         save_predictions(result)
     except Exception as e:
         logger.warning(f"Failed to save predictions: {e}")
+
+    # Persist market snapshots to PostgreSQL (permanent record)
+    try:
+        await save_market_snapshots(result)
+    except Exception as e:
+        logger.warning(f"Failed to save market snapshots: {e}")
 
     return result
 

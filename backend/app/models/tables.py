@@ -143,6 +143,45 @@ class PolymarketMarket(Base):
     game: Mapped["Game"] = relationship(back_populates="markets")
 
 
+class MarketSnapshot(Base):
+    """Permanent record of every market edge the model finds.
+
+    Written by the pipeline on each run.  Unlike PolymarketMarket (which
+    tracks raw exchange data), this stores the FULL analysis output:
+    model probability, edge, verdict, Kelly fraction, Polymarket price,
+    line, and team labels.
+
+    The simulation system reads from this table — never from Polymarket
+    directly — so historical edges are preserved even after markets settle.
+
+    Unique on (game_id, market_type): only the BEST pre-game snapshot is
+    kept per market.  If a later pipeline run has a lower edge (prices
+    moved), the existing row is preserved.
+    """
+    __tablename__ = "market_snapshots"
+    __table_args__ = (UniqueConstraint("game_id", "market_type"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    game_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    game_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    home_team: Mapped[str] = mapped_column(String(3), nullable=False)
+    away_team: Mapped[str] = mapped_column(String(3), nullable=False)
+    market_type: Mapped[str] = mapped_column(String(15), nullable=False)  # moneyline | spread | total
+    home_label: Mapped[str | None] = mapped_column(String(50))  # Polymarket label for home side
+    away_label: Mapped[str | None] = mapped_column(String(50))  # Polymarket label for away side
+    line: Mapped[Decimal | None] = mapped_column(Numeric(5, 1))  # spread or total line
+    polymarket_home_yes: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))  # home/yes price
+    polymarket_home_no: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))   # away/no price
+    model_probability: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))  # model prob for home/yes
+    best_side: Mapped[str | None] = mapped_column(String(50))   # e.g. "Warriors", "Over", "Under"
+    best_edge: Mapped[Decimal | None] = mapped_column(Numeric(5, 3))  # edge magnitude
+    verdict: Mapped[str | None] = mapped_column(String(15))  # STRONG BUY | BUY | LEAN | HOLD | FADE
+    kelly_fraction: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    yes_ev: Mapped[Decimal | None] = mapped_column(Numeric(6, 3))
+    no_ev: Mapped[Decimal | None] = mapped_column(Numeric(6, 3))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Prediction(Base):
     __tablename__ = "predictions"
 
