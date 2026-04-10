@@ -620,42 +620,46 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle, forceE
                   </span>
                 )}
               </div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-3">
+                {/* Home team injuries */}
                 <div>
                   <p className="text-[10px] text-[#64748b] font-semibold uppercase mb-1">
                     {game.home.team}
                   </p>
-                  <div className="space-y-1">
-                    {game.home.injuries.map((inj) => (
-                      <InjuryRow
-                        key={inj.player_id || inj.player_name}
-                        injury={inj}
-                        overrideMode={getOverrideMode(inj.player_name, inj.status, injuryOverrides)}
-                        onToggle={onInjuryToggle}
-                      />
-                    ))}
-                    {game.home.injuries.length === 0 && (
-                      <span className="text-xs text-[#4CAF50]">Full strength</span>
-                    )}
-                  </div>
+                  {game.home.injuries.length > 0 ? (
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                      {game.home.injuries.map((inj) => (
+                        <InjuryRow
+                          key={inj.player_id || inj.player_name}
+                          injury={inj}
+                          overrideMode={getOverrideMode(inj.player_name, inj.status, injuryOverrides)}
+                          onToggle={onInjuryToggle}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="text-xs text-[#4CAF50]">Full strength</span>
+                  )}
                 </div>
+                {/* Away team injuries */}
                 <div>
                   <p className="text-[10px] text-[#64748b] font-semibold uppercase mb-1">
                     {game.away.team}
                   </p>
-                  <div className="space-y-1">
-                    {game.away.injuries.map((inj) => (
-                      <InjuryRow
-                        key={inj.player_id || inj.player_name}
-                        injury={inj}
-                        overrideMode={getOverrideMode(inj.player_name, inj.status, injuryOverrides)}
-                        onToggle={onInjuryToggle}
-                      />
-                    ))}
-                    {game.away.injuries.length === 0 && (
-                      <span className="text-xs text-[#4CAF50]">Full strength</span>
-                    )}
-                  </div>
+                  {game.away.injuries.length > 0 ? (
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                      {game.away.injuries.map((inj) => (
+                        <InjuryRow
+                          key={inj.player_id || inj.player_name}
+                          injury={inj}
+                          overrideMode={getOverrideMode(inj.player_name, inj.status, injuryOverrides)}
+                          onToggle={onInjuryToggle}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="text-xs text-[#4CAF50]">Full strength</span>
+                  )}
                 </div>
               </div>
             </div>
