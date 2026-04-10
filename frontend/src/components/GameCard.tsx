@@ -503,20 +503,6 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle, forceE
         {/* Compact Ratings */}
         <div className="grid grid-cols-2 gap-4 mb-3">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-mono text-[#e2e8f0] font-semibold w-10">{game.home.team}</span>
-            <span className="text-xs text-[#94a3b8] font-mono">NRtg:</span>
-            <span className="text-sm font-mono text-[#e2e8f0]">
-              {game.home.season_nrtg > 0 ? "+" : ""}{game.home.season_nrtg.toFixed(1)}
-            </span>
-            <span className="text-[#64748b]">→</span>
-            <span className="text-sm font-mono text-[#e2e8f0] font-semibold">
-              {game.home.adjusted_nrtg > 0 ? "+" : ""}{game.home.adjusted_nrtg.toFixed(1)}
-            </span>
-            <span className={`text-xs font-mono ${getDeltaColor(game.home.nrtg_delta)}`}>
-              {getDeltaIndicator(game.home.nrtg_delta)} {game.home.nrtg_delta.toFixed(1)}
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
             <span className="text-sm font-mono text-[#e2e8f0] font-semibold w-10">{game.away.team}</span>
             <span className="text-xs text-[#94a3b8] font-mono">NRtg:</span>
             <span className="text-sm font-mono text-[#e2e8f0]">
@@ -530,23 +516,24 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle, forceE
               {getDeltaIndicator(game.away.nrtg_delta)} {game.away.nrtg_delta.toFixed(1)}
             </span>
           </div>
+          <div className="flex items-center gap-2 justify-end">
+            <span className="text-sm font-mono text-[#e2e8f0] font-semibold w-10">{game.home.team}</span>
+            <span className="text-xs text-[#94a3b8] font-mono">NRtg:</span>
+            <span className="text-sm font-mono text-[#e2e8f0]">
+              {game.home.season_nrtg > 0 ? "+" : ""}{game.home.season_nrtg.toFixed(1)}
+            </span>
+            <span className="text-[#64748b]">→</span>
+            <span className="text-sm font-mono text-[#e2e8f0] font-semibold">
+              {game.home.adjusted_nrtg > 0 ? "+" : ""}{game.home.adjusted_nrtg.toFixed(1)}
+            </span>
+            <span className={`text-xs font-mono ${getDeltaColor(game.home.nrtg_delta)}`}>
+              {getDeltaIndicator(game.home.nrtg_delta)} {game.home.nrtg_delta.toFixed(1)}
+            </span>
+          </div>
         </div>
 
         {/* Quick injuries */}
         <div className="flex gap-4 text-xs text-[#94a3b8] mb-3">
-          <span>
-            {game.home.team}:{" "}
-            {game.home.injuries.length > 0
-              ? game.home.injuries.slice(0, 3).map((i) => {
-                  const mode = getOverrideMode(i.player_name, i.status, injuryOverrides);
-                  const statusLabel = mode !== null
-                    ? (mode === "FULL" ? "OUT*" : mode === "OFF" ? "IN*" : "GTD")
-                    : i.status;
-                  return `${i.player_name} (${statusLabel})`;
-                }).join(", ")
-              : "Full strength"}
-            {game.home.injuries.length > 3 && ` +${game.home.injuries.length - 3}`}
-          </span>
           <span>
             {game.away.team}:{" "}
             {game.away.injuries.length > 0
@@ -559,6 +546,19 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle, forceE
                 }).join(", ")
               : "Full strength"}
             {game.away.injuries.length > 3 && ` +${game.away.injuries.length - 3}`}
+          </span>
+          <span>
+            {game.home.team}:{" "}
+            {game.home.injuries.length > 0
+              ? game.home.injuries.slice(0, 3).map((i) => {
+                  const mode = getOverrideMode(i.player_name, i.status, injuryOverrides);
+                  const statusLabel = mode !== null
+                    ? (mode === "FULL" ? "OUT*" : mode === "OFF" ? "IN*" : "GTD")
+                    : i.status;
+                  return `${i.player_name} (${statusLabel})`;
+                }).join(", ")
+              : "Full strength"}
+            {game.home.injuries.length > 3 && ` +${game.home.injuries.length - 3}`}
           </span>
         </div>
 
@@ -601,8 +601,8 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle, forceE
                 Live Box Score
               </h4>
               <div className="grid grid-cols-2 gap-4">
-                <LiveBoxScore players={live.home_players} teamName={game.home.team} />
                 <LiveBoxScore players={live.away_players} teamName={game.away.team} />
+                <LiveBoxScore players={live.home_players} teamName={game.home.team} />
               </div>
             </div>
           )}
@@ -620,15 +620,15 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle, forceE
                   </span>
                 )}
               </div>
-              <div className="space-y-3">
-                {/* Home team injuries */}
+              <div className="grid grid-cols-2 gap-4">
+                {/* Away team injuries (left) */}
                 <div>
                   <p className="text-[10px] text-[#64748b] font-semibold uppercase mb-1">
-                    {game.home.team}
+                    {game.away.team}
                   </p>
-                  {game.home.injuries.length > 0 ? (
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-                      {game.home.injuries.map((inj) => (
+                  {game.away.injuries.length > 0 ? (
+                    <div className="space-y-1">
+                      {game.away.injuries.map((inj) => (
                         <InjuryRow
                           key={inj.player_id || inj.player_name}
                           injury={inj}
@@ -641,14 +641,14 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle, forceE
                     <span className="text-xs text-[#4CAF50]">Full strength</span>
                   )}
                 </div>
-                {/* Away team injuries */}
+                {/* Home team injuries (right) */}
                 <div>
                   <p className="text-[10px] text-[#64748b] font-semibold uppercase mb-1">
-                    {game.away.team}
+                    {game.home.team}
                   </p>
-                  {game.away.injuries.length > 0 ? (
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-                      {game.away.injuries.map((inj) => (
+                  {game.home.injuries.length > 0 ? (
+                    <div className="space-y-1">
+                      {game.home.injuries.map((inj) => (
                         <InjuryRow
                           key={inj.player_id || inj.player_name}
                           injury={inj}
@@ -691,21 +691,7 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle, forceE
                       </div>
 
                       <div className="flex gap-2 flex-1">
-                        <div
-                          className={`flex-1 flex items-center justify-between rounded-md px-3 py-2 border transition-colors ${
-                            bestSide === homeLabel
-                              ? "border-[#00C853]/50 bg-[#00C853]/10"
-                              : "border-[#1e293b] bg-[#111827]"
-                          }`}
-                        >
-                          <span className={`text-sm font-medium ${bestSide === homeLabel ? "text-[#00C853]" : "text-[#e2e8f0]"}`}>
-                            {homeLabel}{type === "spread" && m.line != null ? ` ${formatLine(m.line, "spread")}` : ""}
-                          </span>
-                          <span className={`text-sm font-mono font-bold ${bestSide === homeLabel ? "text-[#00C853]" : "text-[#e2e8f0]"}`}>
-                            {Math.round(homePrice * 100)}¢
-                          </span>
-                        </div>
-
+                        {/* Away side (left) */}
                         <div
                           className={`flex-1 flex items-center justify-between rounded-md px-3 py-2 border transition-colors ${
                             bestSide === awayLabel
@@ -718,6 +704,22 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle, forceE
                           </span>
                           <span className={`text-sm font-mono font-bold ${bestSide === awayLabel ? "text-[#00C853]" : "text-[#e2e8f0]"}`}>
                             {Math.round(awayPrice * 100)}¢
+                          </span>
+                        </div>
+
+                        {/* Home side (right) */}
+                        <div
+                          className={`flex-1 flex items-center justify-between rounded-md px-3 py-2 border transition-colors ${
+                            bestSide === homeLabel
+                              ? "border-[#00C853]/50 bg-[#00C853]/10"
+                              : "border-[#1e293b] bg-[#111827]"
+                          }`}
+                        >
+                          <span className={`text-sm font-medium ${bestSide === homeLabel ? "text-[#00C853]" : "text-[#e2e8f0]"}`}>
+                            {homeLabel}{type === "spread" && m.line != null ? ` ${formatLine(m.line, "spread")}` : ""}
+                          </span>
+                          <span className={`text-sm font-mono font-bold ${bestSide === homeLabel ? "text-[#00C853]" : "text-[#e2e8f0]"}`}>
+                            {Math.round(homePrice * 100)}¢
                           </span>
                         </div>
                       </div>
@@ -829,16 +831,6 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle, forceE
           <div className="grid grid-cols-2 gap-4 mt-4">
             <div>
               <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-1">
-                {game.home.team} Schedule
-              </h4>
-              <div className="text-xs text-[#94a3b8] space-y-0.5">
-                {game.home.schedule.is_b2b && <p className="text-[#FF1744]">Back-to-back</p>}
-                <p>Rest days: {game.home.schedule.rest_days}</p>
-                {game.home.schedule.home_court && <p className="text-[#4CAF50]">Home court (+3.0)</p>}
-              </div>
-            </div>
-            <div>
-              <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-1">
                 {game.away.team} Schedule
               </h4>
               <div className="text-xs text-[#94a3b8] space-y-0.5">
@@ -847,6 +839,16 @@ export default function GameCard({ game, injuryOverrides, onInjuryToggle, forceE
                 {game.away.schedule.road_trip_game > 0 && (
                   <p>Road trip game #{game.away.schedule.road_trip_game}</p>
                 )}
+              </div>
+            </div>
+            <div>
+              <h4 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider mb-1">
+                {game.home.team} Schedule
+              </h4>
+              <div className="text-xs text-[#94a3b8] space-y-0.5">
+                {game.home.schedule.is_b2b && <p className="text-[#FF1744]">Back-to-back</p>}
+                <p>Rest days: {game.home.schedule.rest_days}</p>
+                {game.home.schedule.home_court && <p className="text-[#4CAF50]">Home court (+3.0)</p>}
               </div>
             </div>
           </div>
