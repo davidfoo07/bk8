@@ -845,8 +845,14 @@ async def _process_single_game(
     away_injuries_raw = injuries_data.get(away_abbr, [])
 
     # Player absences with real per-player impact from NBA stats
-    home_absences = _build_player_absences(home_injuries_raw, player_metrics, injury_overrides)
-    away_absences = _build_player_absences(away_injuries_raw, player_metrics, injury_overrides)
+    home_absences = _build_player_absences(
+        home_injuries_raw, player_metrics, injury_overrides,
+        team_nrtg=home_ratings["ortg"] - home_ratings["drtg"],
+    )
+    away_absences = _build_player_absences(
+        away_injuries_raw, player_metrics, injury_overrides,
+        team_nrtg=away_ratings["ortg"] - away_ratings["drtg"],
+    )
 
     # Lineup-adjusted ratings
     home_adj = _lineup_model.calculate_adjusted_ratings(
@@ -1267,6 +1273,7 @@ def _build_player_absences(
     injuries_raw: list[dict[str, Any]],
     player_metrics: dict[str, dict[str, Any]] | None = None,
     injury_overrides: dict[str, str] | None = None,
+    team_nrtg: float = 0.0,
 ) -> list[PlayerAbsence]:
     """Build player absence list with real per-player impact from NBA stats.
 
@@ -1275,10 +1282,19 @@ def _build_player_absences(
       "HALF" = 50% miss weight (uncertain, default for QUESTIONABLE)
       "OFF"  = 0%, excluded, user thinks they will play
 
-    Key fixes:
+    Key design: E_NET_RATING from playerestimatedmetrics is a LEAGUE-WIDE
+    stat that conflates team strength with individual contribution.  A player
+    on a bad team (NRtg -10) with E_NET=-14 isn't *hurting* the team by 14
+    points — the team is already bad.  Their individual contribution is only
+    -14 - (-10) = -4 relative to team average.
+
+    We subtract team_nrtg to get the player's RELATIVE impact.  This prevents
+    the absurd scenario where removing 8 players from a bad team makes the
+    model think the remaining bench players are championship-caliber.
+
+    Other notes:
       - Players under 10 min/game are filtered (too noisy from small samples)
-      - ORtg/DRtg impacts derived symmetrically from NRtg so losing a star
-        always makes the team WORSE (no paradoxical NRtg-goes-up scenarios)
+      - ORtg/DRtg impacts derived symmetrically from NRtg
       - Results sorted by |impact| descending so diminishing returns is fair
     """
     MIN_MINUTES_THRESHOLD = 10.0  # Ignore < 10 min/game (sample size noise)
@@ -1317,7 +1333,7 @@ def _build_player_absences(
 
         if stats:
             minutes = float(stats.get("MIN", 0) or 0)
-            e_net = float(stats.get("E_NET_RATING", 0) or 0)
+            e_net_raw = float(stats.get("E_NET_RATING", 0) or 0)
 
             # Filter out low-minute players: their E_NET is just noise
             # (e.g. Emanuel Miller 6.6 min with E_NET=-32 is meaningless)
@@ -1328,23 +1344,33 @@ def _build_player_absences(
                 )
                 continue
 
+            # CRITICAL: Normalize E_NET relative to team NRtg.
+            #
+            # Raw E_NET conflates team quality with individual contribution.
+            # Example: Sabonis E_NET=-14.4 on SAC (NRtg=-10.0)
+            #   Raw:   model thinks losing him HELPS by +5.35 (absurd)
+            #   Fixed: relative E_NET = -14.4 - (-10.0) = -4.4
+            #          → losing him hurts by ~1.6 (correct direction)
+            #
+            # On good teams this barely matters (OKC NRtg=+10, SGA E_NET=+16
+            # → relative = +6, same direction).  But on bad teams it's the
+            # difference between 93% and 50%.
+            e_net = e_net_raw - team_nrtg
+
             min_share = minutes / 48.0
             dampening = 0.6
 
-            # Core impact: losing a +16 NRtg player hurts by ~6 NRtg
+            # Core impact: losing a +6 relative-NRtg player hurts by ~2 NRtg
             nrtg_impact = -e_net * min_share * dampening * miss_prob
 
             # Split NRtg impact symmetrically into ORtg and DRtg.
-            # This prevents paradoxes where NRtg goes UP when a star is out
-            # (which happened when we used separate E_OFF/E_DEF because
-            # defense could drop more than offense, making NRtg = ORtg-DRtg rise).
-            # With symmetric split: losing a good player always hurts NRtg.
             ortg_impact = nrtg_impact / 2.0    # team offense worse (negative)
             drtg_impact = -nrtg_impact / 2.0   # team defense worse (positive = higher DRtg)
 
             logger.debug(
                 f"  Injury impact: {player_name} ({status}, {miss_prob:.0%} miss) -- "
-                f"E_NET={e_net:+.1f}, MIN={minutes:.1f}, "
+                f"E_NET_raw={e_net_raw:+.1f}, team_nrtg={team_nrtg:+.1f}, "
+                f"E_NET_rel={e_net:+.1f}, MIN={minutes:.1f}, "
                 f"NRtg impact={nrtg_impact:+.2f}"
             )
         else:
