@@ -313,12 +313,8 @@ async def _recalculate_with_overrides(
         top_edges=top_edges,
     )
 
-    # Persist override predictions to disk
-    try:
-        save_predictions(result)
-    except Exception as e:
-        logger.warning(f"Failed to save override predictions: {e}")
-
+    # Not persisted: injury toggles are what-ifs, and saving them would replace
+    # the real prediction in History.
     return result
 
 

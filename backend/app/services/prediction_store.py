@@ -7,10 +7,14 @@ IMPORTANT: Pre-game predictions (with full Polymarket edges) are protected.
 Later pipeline runs (post-game, when Polymarket has delisted markets) will NOT
 overwrite a richer pre-game snapshot.  This ensures the simulation tab always
 has the full set of BUY/STRONG BUY bets for grading.
+
+Each game is locked at tip-off: once it has started, its saved version is never
+replaced, and a game first seen after tip-off is not saved at all — a
+prediction made with in-game knowledge isn't a prediction.
 """
 
 import json
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from loguru import logger
@@ -40,7 +44,57 @@ def _game_market_count(game: dict) -> int:
     return len(game.get("markets", {}))
 
 
-def save_predictions(analysis: DailyAnalysis) -> Path:
+def _has_started(game: dict, now: datetime) -> bool:
+    """True once a game is live/final or its scheduled tip-off has passed."""
+    live = game.get("live") or {}
+    if (live.get("game_status") or 1) >= 2:
+        return True
+    tipoff = game.get("tipoff")
+    if not tipoff:
+        return False
+    try:
+        tip = datetime.fromisoformat(str(tipoff).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if tip.tzinfo is None:
+        tip = tip.replace(tzinfo=UTC)
+    return tip <= now
+
+
+def _lock_started_games(existing: dict | None, new: dict, now: datetime) -> dict:
+    """Return ``new`` with every started game replaced by its saved pre-game version.
+
+    Started games with no saved version are dropped. Top edges follow their games:
+    frozen games keep their saved edges, dropped games lose theirs.
+    """
+    existing_games = {g.get("game_id"): g for g in (existing or {}).get("games", [])}
+    games: list[dict] = []
+    frozen: set[str] = set()
+    dropped: set[str] = set()
+    for game in new.get("games", []):
+        gid = game.get("game_id")
+        if not _has_started(game, now):
+            games.append(game)
+        elif gid in existing_games:
+            games.append(existing_games[gid])
+            frozen.add(gid)
+        else:
+            dropped.add(gid)
+            logger.info(f"🔒 Not saving {gid}: first seen after tip-off")
+
+    top_edges = [
+        e for e in new.get("top_edges", []) if e.get("game_id") not in frozen | dropped
+    ] + [e for e in (existing or {}).get("top_edges", []) if e.get("game_id") in frozen]
+    top_edges.sort(key=lambda e: e.get("edge") or 0, reverse=True)
+
+    result = dict(new)
+    result["games"] = games
+    result["games_count"] = len(games)
+    result["top_edges"] = top_edges
+    return result
+
+
+def save_predictions(analysis: DailyAnalysis) -> Path | None:
     """Save a DailyAnalysis to a dated JSON file.
 
     Per-game merge logic:
@@ -53,14 +107,24 @@ def save_predictions(analysis: DailyAnalysis) -> Path:
     _ensure_dir()
     filepath = PREDICTIONS_DIR / f"{analysis.date.isoformat()}.json"
 
-    new_data = json.loads(analysis.model_dump_json())
-    new_data["saved_at"] = datetime.now().isoformat()
-    new_market_count = _count_markets(new_data)
-
-    # Check existing file
+    existing_data: dict | None = None
     if filepath.exists():
         try:
             existing_data = json.loads(filepath.read_text(encoding="utf-8"))
+        except Exception:
+            existing_data = None  # Corrupted file — overwrite it
+
+    new_data = _lock_started_games(
+        existing_data, json.loads(analysis.model_dump_json()), datetime.now(UTC)
+    )
+    if not new_data["games"]:
+        logger.info(f"🔒 Nothing to save for {analysis.date}: every game already tipped off")
+        return None
+    new_data["saved_at"] = datetime.now().isoformat()
+    new_market_count = _count_markets(new_data)
+
+    if existing_data is not None:
+        try:
             existing_market_count = _count_markets(existing_data)
 
             # Per-game merge: for each game, pick the version with more markets
@@ -84,7 +148,7 @@ def save_predictions(analysis: DailyAnalysis) -> Path:
     filepath.write_text(json.dumps(new_data, indent=2), encoding="utf-8")
     logger.info(
         f"💾 Saved predictions for {analysis.date} → {filepath.name} "
-        f"({analysis.games_count} games, {new_market_count} markets)"
+        f"({new_data['games_count']} games, {new_market_count} markets)"
     )
     return filepath
 
