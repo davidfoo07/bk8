@@ -1,6 +1,86 @@
-"""Pytest configuration and shared fixtures."""
+"""Pytest configuration and shared fixtures.
+
+Tests run against a separate ``<dev db>_test`` database (override with
+TEST_DATABASE_URL), never the dev database from .env. The URL is swapped on
+the settings singleton here, before any test module imports app.models.database
+and builds the engine.
+"""
+
+import os
+from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
+
+from app.config import settings
+
+_dev_db = make_url(settings.database_url).database
+_test_url = make_url(
+    os.environ.get("TEST_DATABASE_URL")
+    or make_url(settings.database_url).set(database=f"{_dev_db}_test").render_as_string(hide_password=False)
+)
+if _test_url.database == _dev_db:
+    raise RuntimeError(f"Test database must differ from dev database {_dev_db!r}")
+
+settings.database_url = _test_url.set(drivername="postgresql+asyncpg").render_as_string(hide_password=False)
+settings.database_url_sync = _test_url.set(drivername="postgresql").render_as_string(hide_password=False)
+
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+_db_ready = False
+
+
+def _psycopg2_url():
+    # SQLAlchemy 2.1 maps bare postgresql:// to psycopg 3, which isn't installed.
+    return make_url(settings.database_url_sync).set(drivername="postgresql+psycopg2")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _test_database():
+    """Recreate the test database and migrate it to head once per session."""
+    global _db_ready
+    from alembic import command
+    from alembic.config import Config
+
+    sync_url = _psycopg2_url()
+    admin = create_engine(sync_url.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{sync_url.database}" WITH (FORCE)'))
+            conn.execute(text(f'CREATE DATABASE "{sync_url.database}"'))
+    except Exception as e:  # Postgres not running: non-DB tests still run
+        print(f"\n[conftest] test database unavailable, DB tests will fail: {e}")
+        yield
+        return
+    finally:
+        admin.dispose()
+
+    # No ini file: alembic.ini hardcodes a stale URL and its logging config
+    # would clobber pytest's log capture.
+    cfg = Config()
+    cfg.set_main_option("script_location", str(_BACKEND_DIR / "alembic"))
+    cfg.set_main_option("sqlalchemy.url", sync_url.render_as_string(hide_password=False))
+    command.upgrade(cfg, "head")
+    _db_ready = True
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _truncate_tables():
+    """Empty every table after each test so tests don't see each other's rows."""
+    yield
+    if not _db_ready:
+        return
+    from app.models.database import Base
+    from app.models import tables  # noqa: F401 — registers models on Base
+
+    names = ", ".join(f'"{t.name}"' for t in Base.metadata.sorted_tables)
+    eng = create_engine(_psycopg2_url())
+    try:
+        with eng.begin() as conn:
+            conn.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+    finally:
+        eng.dispose()
 
 
 @pytest.fixture
