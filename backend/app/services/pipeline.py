@@ -1233,6 +1233,11 @@ def _find_polymarket_prices(
         # Skip first-half (1H), quarter (1Q/2Q), and player prop markets
         is_partial = any(tag in q_lower for tag in ["1h ", "2h ", "1q ", "2q ", "1h:", "2h:"])
 
+        # Polymarket tags the full-game moneyline explicitly — trust that first.
+        if mkt.get("sportsMarketType") == "moneyline":
+            moneyline_market = mkt
+            continue
+
         if "spread" in q_lower:
             if not is_partial:
                 spread_candidates.append(mkt)
@@ -1242,12 +1247,15 @@ def _find_polymarket_prices(
             has_vs = "vs." in q_lower or "vs " in q_lower
             if (has_both_teams or has_vs) and not is_partial:
                 total_candidates.append(mkt)
-        elif "vs." in q_lower or "vs " in q_lower:
-            if "spread" not in q_lower and "o/u" not in q_lower and not is_partial:
-                moneyline_market = mkt
-        elif home_nick in q_lower and away_nick in q_lower:
-            if "spread" not in q_lower and "o/u" not in q_lower and not is_partial:
-                moneyline_market = mkt
+        elif moneyline_market is not None or ":" in question:
+            # Already have a moneyline, or a "Team vs. Team: <prop>" market
+            # (Odd/Even, Team to Score First, ...) — never a moneyline.
+            continue
+        elif not is_partial and (
+            "vs." in q_lower or "vs " in q_lower
+            or (home_nick in q_lower and away_nick in q_lower)
+        ):
+            moneyline_market = mkt
 
     # ── Moneyline ──
     if moneyline_market:
@@ -1338,19 +1346,17 @@ def _extract_total_line(question: str) -> float | None:
 
 
 def _pick_best_spread(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Pick the spread with the SMALLEST absolute line (main line, not alt)."""
-    best: dict[str, Any] | None = None
-    best_abs_line = float("inf")
-    for mkt in candidates:
-        q = mkt.get("question", "")
-        line = _extract_spread_line(q)
-        if line is not None:
-            if abs(line) < best_abs_line:
-                best_abs_line = abs(line)
-                best = mkt
-        elif best is None:
-            best = mkt
-    return best
+    """Pick the main spread line, not an alt.
+
+    Polymarket opens the main line first and adds alt lines (often smaller,
+    e.g. -1.5 when the main is -2.5) later, so the earliest-created market
+    with a parseable line is the main one. Falls back to listing order.
+    """
+    with_line = [m for m in candidates if _extract_spread_line(m.get("question", "")) is not None]
+    if not with_line:
+        return candidates[0] if candidates else None
+    # min() is stable, so markets without createdAt keep their listing order.
+    return min(with_line, key=lambda m: m.get("createdAt") or "~")
 
 
 def _pick_best_total(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
