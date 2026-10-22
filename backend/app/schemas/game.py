@@ -65,6 +65,12 @@ class TeamGameData(BaseModel):
     season_ortg: float
     season_drtg: float
     season_nrtg: float
+    # Early-season prior the season ratings are blended toward.
+    prior_nrtg: float | None = None
+    last_season_nrtg: float | None = None
+    prior_source: str = ""  # roster | team | league
+    roster_turnover: float | None = None  # 0 = same roster, 1 = all new
+    stale_prior: bool = False
     adjusted_ortg: float
     adjusted_drtg: float
     adjusted_nrtg: float

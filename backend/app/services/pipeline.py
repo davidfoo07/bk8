@@ -20,10 +20,15 @@ import re
 
 from loguru import logger
 
-from app.analytics.edge_calculator import calculate_edge, calculate_game_edges
+from app.analytics.edge_calculator import calculate_edge, cap_verdict
 from app.analytics.lineup_adjustment import OnOffSplitModel, compute_player_impact
 from app.analytics.prediction_model import calculate_schedule_modifier, predict_game, SPREAD_TO_WIN_PROB_SIGMA
 from app.analytics.schedule_engine import calculate_schedule_context, determine_motivation
+from app.analytics.roster_prior import (
+    compute_roster_priors,
+    compute_roster_turnover,
+    is_stale_prior,
+)
 from app.analytics.season_blend import blend_player_metrics, blend_team_ratings
 from app.config import current_season, previous_season, settings
 from app.connectors.injuries import InjuryFeedConnector
@@ -456,9 +461,12 @@ async def _fetch_team_ratings(
     season = current_season()
     prior_season = previous_season(season)
 
-    current, prior = await asyncio.gather(
+    current, prior, current_rosters, prior_rosters, prior_players = await asyncio.gather(
         _fetch_season_team_ratings(season, warnings),
         _fetch_season_team_ratings(prior_season, warnings, ttl_seconds=86400),
+        _fetch_rosters(season, warnings),
+        _fetch_rosters(prior_season, warnings, ttl_seconds=86400),
+        _fetch_season_player_metrics(prior_season, warnings, ttl_seconds=86400),
     )
 
     result: dict[str, dict[str, float]] = {}
@@ -468,11 +476,40 @@ async def _fetch_team_ratings(
             warnings.append(f"No {season} team ratings yet — using {prior_season} ratings.")
         elif not prior:
             warnings.append(f"{prior_season} ratings unavailable — regressing {season} to league average.")
-        result = blend_team_ratings(current, prior, k=settings.rating_blend_k)
+
+        # Prior = this season's roster rated on last season's player impact,
+        # falling back to last season's team rating per team.
+        prior_players_by_id = _metrics_by_player_id(prior_players)
+        roster_priors = compute_roster_priors(current_rosters, prior_players_by_id, prior)
+        turnover = compute_roster_turnover(current_rosters, prior_rosters, prior_players_by_id)
+        blend_prior = {**prior, **roster_priors}
+        if not roster_priors:
+            warnings.append(
+                "Roster-based prior unavailable — early-season ratings lean on "
+                f"{prior_season} team ratings."
+            )
+
+        result = blend_team_ratings(current, blend_prior, k=settings.rating_blend_k)
+        for abbr, row in result.items():
+            source = "roster" if abbr in roster_priors else ("team" if abbr in prior else "league")
+            base = blend_prior.get(abbr)
+            team_turnover = turnover.get(abbr, {}).get("turnover")
+            row.update({
+                "prior_source": source,
+                "prior_nrtg": round(float(base["nrtg"]), 2) if base else 0.0,
+                "last_season_nrtg": round(float(prior[abbr]["nrtg"]), 2) if abbr in prior else None,
+                "roster_turnover": team_turnover,
+                "stale_prior": is_stale_prior(
+                    source, team_turnover, row["current_weight"],
+                    settings.roster_turnover_stale_threshold,
+                ),
+            })
         avg_w = sum(r["current_weight"] for r in result.values()) / len(result)
+        stale = sorted(abbr for abbr, r in result.items() if r["stale_prior"])
         logger.info(
             f"✅ Team ratings: {season} ({len(current)} teams) blended with "
-            f"{prior_season} ({len(prior)} teams), avg current weight {avg_w:.0%}"
+            f"{len(roster_priors)} roster priors / {prior_season} ({len(prior)} teams), "
+            f"avg current weight {avg_w:.0%}, stale priors: {stale or 'none'}"
         )
         _cache.set("team_ratings", result)
 
@@ -516,6 +553,60 @@ async def _fetch_season_team_ratings(
     finally:
         await nba.close()
     return result
+
+
+# Rosters smaller than this are treated as a bad response, not a real team.
+_MIN_ROSTER_SIZE = 8
+
+
+async def _fetch_rosters(
+    season: str,
+    warnings: list[str],
+    ttl_seconds: int = 6 * 3600,
+) -> dict[str, list[int]]:
+    """Roster per team for one season → {abbr: [player_id, ...]} (commonteamroster).
+
+    Teams whose roster fails to load (or comes back implausibly small) are
+    omitted; callers fall back per team.
+    """
+    cache_key = f"rosters_{season}"
+    cached = _cache.get(cache_key, ttl_seconds=ttl_seconds)
+    if cached:
+        return cached
+
+    nba = NBAApiConnector()
+    semaphore = asyncio.Semaphore(5)  # stats.nba.com throttles bursts
+
+    async def one(team_id: int, abbr: str) -> tuple[str, list[int]]:
+        async with semaphore:
+            try:
+                rows = await nba.get_team_roster(team_id, season)
+            except Exception as e:
+                logger.warning(f"Roster fetch failed for {abbr} {season}: {e}")
+                return abbr, []
+        ids = [int(r["PLAYER_ID"]) for r in rows if r.get("PLAYER_ID")]
+        if len(ids) < _MIN_ROSTER_SIZE:
+            logger.warning(f"{abbr} {season} roster has {len(ids)} players; ignoring")
+            return abbr, []
+        return abbr, ids
+
+    try:
+        pairs = await asyncio.gather(*(one(tid, abbr) for tid, abbr in NBA_TEAM_ID_TO_ABBR.items()))
+    finally:
+        await nba.close()
+
+    result = {abbr: ids for abbr, ids in pairs if ids}
+    if len(result) < len(NBA_TEAM_ID_TO_ABBR):
+        missing = len(NBA_TEAM_ID_TO_ABBR) - len(result)
+        warnings.append(f"Rosters unavailable for {missing} teams ({season}).")
+    if result:
+        logger.info(f"Fetched {season} rosters for {len(result)} teams")
+        _cache.set(cache_key, result)
+    return result
+
+
+def _metrics_by_player_id(metrics: dict[str, dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    return {int(row["PLAYER_ID"]): row for row in metrics.values() if row.get("PLAYER_ID")}
 
 
 def _parse_team_ratings_rows(raw: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
@@ -703,7 +794,13 @@ async def _fetch_player_metrics(
 async def _fetch_season_player_metrics(
     season: str,
     warnings: list[str],
+    ttl_seconds: int = 3600,
 ) -> dict[str, dict[str, Any]]:
+    cache_key = f"player_metrics_{season}"
+    cached = _cache.get(cache_key, ttl_seconds=ttl_seconds)
+    if cached:
+        return cached
+
     nba = NBAApiConnector()
     result: dict[str, dict[str, Any]] = {}
     try:
@@ -712,6 +809,8 @@ async def _fetch_season_player_metrics(
             name = row.get("PLAYER_NAME", "")
             if name:
                 result[name] = row
+        if result:
+            _cache.set(cache_key, result)
     except Exception as e:
         logger.error(f"Failed to fetch {season} player metrics: {e}")
         warnings.append(f"Player metrics unavailable ({season}): {e}")
@@ -1097,6 +1196,26 @@ async def _process_single_game(
                             best_side="SETTLED", best_edge=0.0, verdict="SETTLED"),
         )
 
+    # Stale prior: early-season rating leans on a prior that ignores a rebuilt
+    # roster → the edge is not trustworthy.  Keep the numbers, downgrade the signal.
+    game_warnings: list[str] = []
+    stale_teams = [
+        abbr
+        for abbr, r in ((away_abbr, away_ratings), (home_abbr, home_ratings))
+        if r.get("stale_prior")
+    ]
+    if stale_teams:
+        prediction = prediction.model_copy(update={"confidence": "LOW"})
+        markets = {
+            key: mkt.model_copy(update={"edge": cap_verdict(mkt.edge, "LEAN")})
+            for key, mkt in markets.items()
+        }
+        game_warnings.append(
+            f"Stale roster prior for {', '.join(stale_teams)} (high offseason turnover, no "
+            f"roster-based rating) — confidence LOW, verdicts capped at LEAN."
+        )
+        logger.warning(f"  {away_abbr}@{home_abbr}: {game_warnings[-1]}")
+
     # Injury schemas
     home_injury_schemas = [
         InjurySchema(
@@ -1124,7 +1243,7 @@ async def _process_single_game(
         injury_freshness="FRESH" if injuries_data else "MISSING",
         price_freshness="FRESH" if poly_prices else "MISSING",
         cross_source_validated=bool(ratings_data and standings_data),
-        warnings=warnings[:5],
+        warnings=(game_warnings + warnings)[:5],
     )
 
     # Live game state
@@ -1169,6 +1288,11 @@ async def _process_single_game(
             motivation=home_motivation.motivation_flag,
             season_ortg=home_ratings["ortg"], season_drtg=home_ratings["drtg"],
             season_nrtg=home_ratings["nrtg"],
+            prior_nrtg=home_ratings.get("prior_nrtg"),
+            last_season_nrtg=home_ratings.get("last_season_nrtg"),
+            prior_source=home_ratings.get("prior_source", ""),
+            roster_turnover=home_ratings.get("roster_turnover"),
+            stale_prior=bool(home_ratings.get("stale_prior", False)),
             adjusted_ortg=home_adj.adjusted_ortg, adjusted_drtg=home_adj.adjusted_drtg,
             adjusted_nrtg=home_adj.adjusted_nrtg, nrtg_delta=home_adj.nrtg_delta,
             injuries=home_injury_schemas, schedule=home_schedule,
@@ -1179,6 +1303,11 @@ async def _process_single_game(
             motivation=away_motivation.motivation_flag,
             season_ortg=away_ratings["ortg"], season_drtg=away_ratings["drtg"],
             season_nrtg=away_ratings["nrtg"],
+            prior_nrtg=away_ratings.get("prior_nrtg"),
+            last_season_nrtg=away_ratings.get("last_season_nrtg"),
+            prior_source=away_ratings.get("prior_source", ""),
+            roster_turnover=away_ratings.get("roster_turnover"),
+            stale_prior=bool(away_ratings.get("stale_prior", False)),
             adjusted_ortg=away_adj.adjusted_ortg, adjusted_drtg=away_adj.adjusted_drtg,
             adjusted_nrtg=away_adj.adjusted_nrtg, nrtg_delta=away_adj.nrtg_delta,
             injuries=away_injury_schemas, schedule=away_schedule,

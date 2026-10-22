@@ -140,6 +140,23 @@ class NBAApiConnector(BaseConnector):
 
         return []
 
+    async def get_team_roster(
+        self, team_id: int, season: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch a team's roster (commonteamroster) for the season.
+
+        Returns list of dicts with keys: TeamID, PLAYER, PLAYER_ID, POSITION,
+        HOW_ACQUIRED, SUPPLEMENTAL_STATUS, etc.  Raises on HTTP/timeout errors
+        (after fetch's retries) so callers can fall back.
+        """
+        params = {"LeagueID": "00", "Season": season or current_season(), "TeamID": team_id}
+        data = await self.fetch("/commonteamroster", params=params)
+        for result_set in data.get("resultSets") or []:
+            if result_set.get("name") == "CommonTeamRoster":
+                headers = result_set["headers"]
+                return [dict(zip(headers, row, strict=False)) for row in result_set["rowSet"]]
+        return []
+
     async def get_todays_games(self, game_date: date | None = None) -> list[dict[str, Any]]:
         if game_date is None:
             game_date = date.today()

@@ -111,6 +111,23 @@ def _get_verdict(edge: float) -> str:
         return "NO EDGE"
 
 
+VERDICT_ORDER = ("NO EDGE", "LEAN", "BUY", "STRONG BUY")
+
+
+def cap_verdict(edge: EdgeResult, max_verdict: str = "LEAN") -> EdgeResult:
+    """Return ``edge`` with its verdict capped at ``max_verdict``.
+
+    Used when the model's inputs are known to be unreliable (e.g. a stale
+    roster prior): the edge numbers stay visible but the signal is downgraded.
+    Non-ranked verdicts (SETTLED) pass through unchanged.
+    """
+    if edge.verdict not in VERDICT_ORDER or max_verdict not in VERDICT_ORDER:
+        return edge
+    if VERDICT_ORDER.index(edge.verdict) <= VERDICT_ORDER.index(max_verdict):
+        return edge
+    return edge.model_copy(update={"verdict": max_verdict})
+
+
 def calculate_game_edges(
     home_win_prob: float,
     spread_cover_prob: float,

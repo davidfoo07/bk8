@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     # Higher K leans on last season longer (K=15 → 50/50 at 15 games played).
     rating_blend_k: float = 15.0
     player_blend_k: float = 10.0
+    # Roster turnover (0-1, mean of minutes-left and minutes-new shares) at
+    # which a team whose prior is NOT roster-based is treated as stale: model
+    # confidence drops to LOW and verdicts are capped at LEAN.
+    roster_turnover_stale_threshold: float = 0.35
     # Motivation flags (FIGHTING/DESPERATE/...) are forced NEUTRAL until
     # a team has played this many games — early standings mean nothing.
     early_season_games: int = 20
