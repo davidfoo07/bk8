@@ -9,6 +9,7 @@ import httpx
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from app.config import current_season
 from app.connectors.base import BaseConnector
 
 
@@ -71,7 +72,7 @@ class NBAApiConnector(BaseConnector):
         except Exception:
             return False
 
-    async def get_team_ratings(self, season: str = "2025-26") -> list[dict[str, Any]]:
+    async def get_team_ratings(self, season: str | None = None) -> list[dict[str, Any]]:
         """Fetch team offensive/defensive ratings for the season.
 
         Priority order (fastest-to-slowest, most reliable first):
@@ -81,7 +82,7 @@ class NBAApiConnector(BaseConnector):
         """
         # Try teamestimatedmetrics first (most reliable, ~200ms)
         try:
-            params = {"LeagueID": "00", "Season": season, "SeasonType": "Regular Season"}
+            params = {"LeagueID": "00", "Season": season or current_season(), "SeasonType": "Regular Season"}
             data = await self.fetch("/teamestimatedmetrics", params=params)
             result_set = data.get("resultSets") or data.get("resultSet")
             if isinstance(result_set, list):
@@ -99,7 +100,7 @@ class NBAApiConnector(BaseConnector):
         for measure_type in ("Advanced", "Base"):
             try:
                 params = {
-                    "LeagueID": "00", "Season": season,
+                    "LeagueID": "00", "Season": season or current_season(),
                     "SeasonType": "Regular Season",
                     "PerMode": "PerGame", "MeasureType": measure_type,
                 }
@@ -115,14 +116,14 @@ class NBAApiConnector(BaseConnector):
 
         return []
 
-    async def get_player_estimated_metrics(self, season: str = "2025-26") -> list[dict[str, Any]]:
+    async def get_player_estimated_metrics(self, season: str | None = None) -> list[dict[str, Any]]:
         """Fetch per-player estimated metrics (E_NET_RATING, E_USG_PCT, MIN, etc).
 
         Returns list of dicts with keys: PLAYER_ID, PLAYER_NAME, GP, MIN,
         E_OFF_RATING, E_DEF_RATING, E_NET_RATING, E_USG_PCT, E_PACE, etc.
         """
         try:
-            params = {"LeagueID": "00", "Season": season, "SeasonType": "Regular Season"}
+            params = {"LeagueID": "00", "Season": season or current_season(), "SeasonType": "Regular Season"}
             data = await self.fetch("/playerestimatedmetrics", params=params)
             # Uses "resultSet" (singular) like teamestimatedmetrics
             result_set = data.get("resultSet") or data.get("resultSets")
@@ -168,9 +169,9 @@ class NBAApiConnector(BaseConnector):
         data = await self.fetch("/boxscoretraditionalv3", params=params)
         return data
 
-    async def get_standings(self, season: str = "2025-26") -> list[dict[str, Any]]:
+    async def get_standings(self, season: str | None = None) -> list[dict[str, Any]]:
         params = {
-            "LeagueID": "00", "Season": season, "SeasonType": "Regular Season",
+            "LeagueID": "00", "Season": season or current_season(), "SeasonType": "Regular Season",
         }
         data = await self.fetch("/leaguestandingsv3", params=params)
         headers = data["resultSets"][0]["headers"]
@@ -178,9 +179,9 @@ class NBAApiConnector(BaseConnector):
         return [dict(zip(headers, row)) for row in rows]
 
     async def get_team_schedule(
-        self, team_id: str, season: str = "2025-26"
+        self, team_id: str, season: str | None = None
     ) -> list[dict[str, Any]]:
-        params = {"LeagueID": "00", "Season": season, "TeamID": team_id}
+        params = {"LeagueID": "00", "Season": season or current_season(), "TeamID": team_id}
         data = await self.fetch("/teamgamelog", params=params)
         headers = data["resultSets"][0]["headers"]
         rows = data["resultSets"][0]["rowSet"]

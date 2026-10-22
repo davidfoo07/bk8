@@ -24,6 +24,8 @@ from app.analytics.edge_calculator import calculate_edge, calculate_game_edges
 from app.analytics.lineup_adjustment import OnOffSplitModel, compute_player_impact
 from app.analytics.prediction_model import calculate_schedule_modifier, predict_game, SPREAD_TO_WIN_PROB_SIGMA
 from app.analytics.schedule_engine import calculate_schedule_context, determine_motivation
+from app.analytics.season_blend import blend_player_metrics, blend_team_ratings
+from app.config import current_season, previous_season, settings
 from app.connectors.injuries import InjuryFeedConnector
 from app.connectors.nba_api import NBAApiConnector
 from app.connectors.pbpstats import PBPStatsConnector
@@ -442,46 +444,37 @@ async def _fetch_team_ratings(
     warnings: list[str],
     standings_fallback: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, float]]:
+    """Team ratings for the current season, blended with last season by GP.
+
+    Early in a season the current sample is tiny (DRtg 81 after one game), so
+    ratings are regressed toward the prior season — see analytics/season_blend.
+    """
     cached = _cache.get("team_ratings", ttl_seconds=3600)
     if cached:
         return cached
 
-    nba = NBAApiConnector()
+    season = current_season()
+    prior_season = previous_season(season)
+
+    current, prior = await asyncio.gather(
+        _fetch_season_team_ratings(season, warnings),
+        _fetch_season_team_ratings(prior_season, warnings, ttl_seconds=86400),
+    )
+
     result: dict[str, dict[str, float]] = {}
-    try:
-        raw = await nba.get_team_ratings()
-        for row in raw:
-            team_id = row.get("TEAM_ID")
-            abbr = NBA_TEAM_ID_TO_ABBR.get(team_id)
-            if not abbr:
-                continue
-            ortg = row.get("OFF_RATING") or row.get("E_OFF_RATING")
-            drtg = row.get("DEF_RATING") or row.get("E_DEF_RATING")
-            nrtg = row.get("NET_RATING") or row.get("E_NET_RATING")
-            pace = row.get("PACE") or row.get("E_PACE")
-
-            if ortg is None:
-                pts = float(row.get("PTS", 110))
-                ortg = pts
-                drtg = float(row.get("OPP_PTS", 110)) if "OPP_PTS" in row else 110.0
-                nrtg = ortg - drtg
-
-            result[abbr] = {
-                "ortg": float(ortg or 112),
-                "drtg": float(drtg or 110),
-                "nrtg": float(nrtg or 2),
-                "pace": float(pace or 100),
-            }
-        if result:
-            logger.info(f"✅ Fetched ratings for {len(result)} teams from NBA API")
-            _cache.set("team_ratings", result)
-        else:
-            logger.warning("NBA API returned 0 team ratings rows")
-    except Exception as e:
-        logger.error(f"Failed to fetch team ratings from NBA API: {e}")
-        warnings.append(f"Team ratings API unavailable: {e}")
-    finally:
-        await nba.close()
+    if current or prior:
+        if not current:
+            logger.warning(f"No {season} team ratings yet; using {prior_season} ratings")
+            warnings.append(f"No {season} team ratings yet — using {prior_season} ratings.")
+        elif not prior:
+            warnings.append(f"{prior_season} ratings unavailable — regressing {season} to league average.")
+        result = blend_team_ratings(current, prior, k=settings.rating_blend_k)
+        avg_w = sum(r["current_weight"] for r in result.values()) / len(result)
+        logger.info(
+            f"✅ Team ratings: {season} ({len(current)} teams) blended with "
+            f"{prior_season} ({len(prior)} teams), avg current weight {avg_w:.0%}"
+        )
+        _cache.set("team_ratings", result)
 
     # Fallback: estimate from standings
     if not result and standings_fallback:
@@ -495,6 +488,65 @@ async def _fetch_team_ratings(
         warnings.append("No team ratings data available from any source")
 
     return result
+
+
+async def _fetch_season_team_ratings(
+    season: str,
+    warnings: list[str],
+    ttl_seconds: int = 3600,
+) -> dict[str, dict[str, float]]:
+    """Raw (unblended) ratings for one season → {abbr: {ortg, drtg, nrtg, pace, gp}}."""
+    cache_key = f"team_ratings_{season}"
+    cached = _cache.get(cache_key, ttl_seconds=ttl_seconds)
+    if cached:
+        return cached
+
+    nba = NBAApiConnector()
+    result: dict[str, dict[str, float]] = {}
+    try:
+        raw = await nba.get_team_ratings(season)
+        result = _parse_team_ratings_rows(raw)
+        if result:
+            _cache.set(cache_key, result)
+        else:
+            logger.warning(f"NBA API returned 0 team ratings rows for {season}")
+    except Exception as e:
+        logger.error(f"Failed to fetch {season} team ratings from NBA API: {e}")
+        warnings.append(f"Team ratings API unavailable ({season}): {e}")
+    finally:
+        await nba.close()
+    return result
+
+
+def _parse_team_ratings_rows(raw: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
+    result: dict[str, dict[str, float]] = {}
+    for row in raw:
+        abbr = NBA_TEAM_ID_TO_ABBR.get(row.get("TEAM_ID"))
+        if not abbr:
+            continue
+        ortg = _first_present(row, "OFF_RATING", "E_OFF_RATING")
+        drtg = _first_present(row, "DEF_RATING", "E_DEF_RATING")
+        pace = _first_present(row, "PACE", "E_PACE")
+
+        if ortg is None:
+            ortg = float(row.get("PTS", 110))
+            drtg = float(row.get("OPP_PTS", 110)) if "OPP_PTS" in row else 110.0
+
+        result[abbr] = {
+            "ortg": float(ortg),
+            "drtg": float(drtg if drtg is not None else 110),
+            "nrtg": float(ortg) - float(drtg if drtg is not None else 110),
+            "pace": float(pace if pace is not None else 100),
+            "gp": float(row.get("GP", 0) or 0),
+        }
+    return result
+
+
+def _first_present(row: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if row.get(key) is not None:
+            return row[key]
+    return None
 
 
 def _estimate_ratings_from_standings(
@@ -622,28 +674,47 @@ async def _fetch_player_metrics(
     """Fetch per-player estimated metrics → {player_name: stats_dict}.
 
     Used to calculate real injury impact (E_NET_RATING × minutes_share).
+    Current-season numbers are blended with last season by GP so early-season
+    noise (and injured players with 0 GP) don't break absence impacts.
     Cached for 1 hour since these don't change during a game day.
     """
     cached = _cache.get("player_metrics", ttl_seconds=3600)
     if cached:
         return cached
 
+    season = current_season()
+    prior_season = previous_season(season)
+    current, prior = await asyncio.gather(
+        _fetch_season_player_metrics(season, warnings),
+        _fetch_season_player_metrics(prior_season, warnings),
+    )
+    result = blend_player_metrics(current, prior, k=settings.player_blend_k)
+    if result:
+        logger.info(
+            f"✅ Player metrics: {len(current)} {season} + {len(prior)} {prior_season} "
+            f"→ {len(result)} players"
+        )
+        _cache.set("player_metrics", result)
+    else:
+        logger.warning("playerestimatedmetrics returned 0 rows for both seasons")
+    return result
+
+
+async def _fetch_season_player_metrics(
+    season: str,
+    warnings: list[str],
+) -> dict[str, dict[str, Any]]:
     nba = NBAApiConnector()
     result: dict[str, dict[str, Any]] = {}
     try:
-        raw = await nba.get_player_estimated_metrics()
+        raw = await nba.get_player_estimated_metrics(season)
         for row in raw:
             name = row.get("PLAYER_NAME", "")
             if name:
                 result[name] = row
-        if result:
-            logger.info(f"✅ Fetched estimated metrics for {len(result)} players")
-            _cache.set("player_metrics", result)
-        else:
-            logger.warning("playerestimatedmetrics returned 0 rows")
     except Exception as e:
-        logger.error(f"Failed to fetch player metrics: {e}")
-        warnings.append(f"Player metrics unavailable: {e}")
+        logger.error(f"Failed to fetch {season} player metrics: {e}")
+        warnings.append(f"Player metrics unavailable ({season}): {e}")
     finally:
         await nba.close()
     return result
@@ -884,6 +955,7 @@ async def _process_single_game(
         conference_seed=home_standings.get("seed", 15),
         clinch_status=home_standings.get("clinch_status", "NONE"),
         games_remaining=max(0, games_remaining),
+        early_season_games=settings.early_season_games,
     )
     away_games_remaining = 82 - (away_standings.get("wins", 0) + away_standings.get("losses", 0))
     away_motivation = determine_motivation(
@@ -891,6 +963,7 @@ async def _process_single_game(
         conference_seed=away_standings.get("seed", 15),
         clinch_status=away_standings.get("clinch_status", "NONE"),
         games_remaining=max(0, away_games_remaining),
+        early_season_games=settings.early_season_games,
     )
 
     # Polymarket prices

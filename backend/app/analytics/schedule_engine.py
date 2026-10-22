@@ -129,6 +129,8 @@ def determine_motivation(
     conference_seed: int,
     clinch_status: str = "NONE",
     games_remaining: int = 0,
+    early_season_games: int = 0,
+    season_length: int = 82,
 ) -> StandingsInfo:
     """
     Determine team motivation based on standings context.
@@ -137,12 +139,16 @@ def determine_motivation(
     - REST_EXPECTED: clinched seeding, nothing to play for
     - DESPERATE: 1-2 games from elimination or play-in bubble
     - FIGHTING: seeding still in flux
-    - NEUTRAL: default
+    - NEUTRAL: default, and always for the first ``early_season_games``
+      games (seeds after a handful of games mean nothing)
     """
     motivation_flag = "NEUTRAL"
     motivation_note = ""
+    games_played = season_length - games_remaining
 
-    if clinch_status in ("CLINCHED_1_SEED", "CLINCHED_DIVISION", "CLINCHED_BEST_RECORD"):
+    if games_played < early_season_games:
+        motivation_note = f"Early season ({games_played} games played) — standings not yet meaningful."
+    elif clinch_status in ("CLINCHED_1_SEED", "CLINCHED_DIVISION", "CLINCHED_BEST_RECORD"):
         motivation_flag = "REST_EXPECTED"
         motivation_note = f"Clinched {clinch_status.replace('CLINCHED_', '').replace('_', ' ').lower()}. May rest players."
     elif clinch_status == "ELIMINATED":

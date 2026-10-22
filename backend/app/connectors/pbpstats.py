@@ -6,6 +6,7 @@ import httpx
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from app.config import current_season
 from app.connectors.base import BaseConnector
 
 
@@ -53,7 +54,7 @@ class PBPStatsConnector(BaseConnector):
     async def health_check(self) -> bool:
         """Check if PBP Stats API is reachable."""
         try:
-            await self.fetch("/get-teams", params={"Season": "2025-26", "SeasonType": "Regular Season"})
+            await self.fetch("/get-teams", params={"Season": current_season(), "SeasonType": "Regular Season"})
             return True
         except Exception:
             return False
@@ -61,7 +62,7 @@ class PBPStatsConnector(BaseConnector):
     async def get_player_on_off(
         self,
         team_id: str,
-        season: str = "2025-26",
+        season: str | None = None,
         season_type: str = "Regular Season",
     ) -> list[dict[str, Any]]:
         """
@@ -70,7 +71,7 @@ class PBPStatsConnector(BaseConnector):
         """
         params = {
             "TeamId": team_id,
-            "Season": season,
+            "Season": season or current_season(),
             "SeasonType": season_type,
         }
         try:
@@ -82,12 +83,12 @@ class PBPStatsConnector(BaseConnector):
 
     async def get_team_totals(
         self,
-        season: str = "2025-26",
+        season: str | None = None,
         season_type: str = "Regular Season",
     ) -> list[dict[str, Any]]:
         """Fetch team-level totals (ORtg, DRtg, Pace, etc.)."""
         params = {
-            "Season": season,
+            "Season": season or current_season(),
             "SeasonType": season_type,
         }
         try:
@@ -100,7 +101,7 @@ class PBPStatsConnector(BaseConnector):
     async def get_lineup_stats(
         self,
         team_id: str,
-        season: str = "2025-26",
+        season: str | None = None,
         lineup_size: int = 5,
     ) -> list[dict[str, Any]]:
         """
@@ -109,7 +110,7 @@ class PBPStatsConnector(BaseConnector):
         """
         params = {
             "TeamId": team_id,
-            "Season": season,
+            "Season": season or current_season(),
             "SeasonType": "Regular Season",
             "Type": f"{lineup_size}Man",
         }
