@@ -9,6 +9,7 @@ from app.analytics.lineup_adjustment import (
 from app.analytics.prediction_model import (
     calculate_schedule_modifier,
     estimate_total,
+    league_scoring_baseline,
     margin_to_win_probability,
     predict_game,
     win_probability_to_margin,
@@ -28,6 +29,7 @@ __all__ = [
     "compute_player_impact",
     "determine_motivation",
     "estimate_total",
+    "league_scoring_baseline",
     "margin_to_win_probability",
     "predict_game",
     "win_probability_to_margin",

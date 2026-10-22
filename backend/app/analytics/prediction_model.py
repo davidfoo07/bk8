@@ -4,10 +4,11 @@ Prediction Model — V2: Pace-Adjusted, Calibrated, Late-Season Aware.
 Improvements over V1:
   - Multiplicative total estimation using per-team pace (not pace=100 hardcode)
   - Proper matchup pace calculation: geometric mean of both teams' pace
-  - Late-season scoring bias correction (+3.0 pts for March/April)
+  - Late-season scoring bias correction (+1.0 pts for March/April)
   - GAME_STD_DEV tuned from 12.0 → 11.5 (tighter probabilities, fewer coin-flips)
-  - Over/under standard deviation separate from spread stdev (scoring variance
-    is higher than margin variance: σ_total ≈ 13.5)
+  - Over/under standard deviation separate from spread stdev (backtested
+    σ_total ≈ 19)
+  - Totals level tracks the current season's league scoring, not last season's
   - Motivation modifier feeds into projected margin for end-of-season games
   - Spread cover uses proper continuous CDF (handles positive/negative lines)
 """
@@ -30,21 +31,37 @@ HOME_COURT_ADVANTAGE = 3.0         # points; NBA long-run average ≈ 2.8-3.2
 SPREAD_TO_WIN_PROB_SIGMA = 5.8     # logistic function width; lower = more decisive
                                     # (V1 was 6.0; 5.8 better calibrates 60-70% picks)
 GAME_STD_DEV = 11.5                # spread variance; NBA actual ≈ 11-12
-TOTAL_STD_DEV = 13.5               # total-score variance; wider than spread
-                                    # because both teams' random offsets are added,
-                                    # not differenced.  √(2) × single-team-σ ≈ 13.5.
-LEAGUE_AVG_ORTG = 112.7            # 2025-26 league average ORtg (updated periodically)
-LEAGUE_AVG_PACE = 102.0            # 2025-26 league average pace
+TOTAL_STD_DEV = 19.0               # σ of (actual total − projected total).  Backtest
+                                    # 2018-19…2025-26 (7.4k games, as-of-date ratings):
+                                    # residual sd 18.7-19.6 per season; σ=19 maximises
+                                    # likelihood and matches the >5 / >10 pt tail rates.
+                                    # The old 13.5 made 3-5 pt gaps look like 12%+ edges.
+LEAGUE_AVG_ORTG = 112.7            # 2025-26 league average ORtg (fallback only)
+LEAGUE_AVG_PACE = 102.0            # 2025-26 league average pace (fallback only)
 
-# Late-season scoring bias: March/April games score ~2 points higher than
-# early-season averages.  Contributing factors:
-#   - Playoff-race urgency increases pace for desperate teams
-#   - Tanking teams pull starters → opponent scores freely in garbage time
-#   - Defensive intensity drops when seeds are locked
-#   - Lighter officiating towards season end → faster play
-# Kept conservative at 2.0 rather than 3.0 — avoids over-correcting for
-# games where both teams are still competing hard defensively.
-LATE_SEASON_TOTAL_BIAS = 2.0       # additive points for games in March/April
+# ─── Totals calibration ─────────────────────────────────────────────
+# ORtg × pace from teamestimatedmetrics is per 48 minutes, so league-average
+# inputs reproduce the regulation scoring level only.  Overtime (~5% of games,
+# ~+20 pts each) plus estimated-metric shrinkage put real totals 1.1-1.9 pts
+# higher every season 2017-18…2025-26 (mean 1.4).
+TOTAL_OT_ADJUSTMENT = 1.4
+
+# The league scoring level moves season to season (2017-18 → 2025-26:
+# +9.5, +0.8, +1.2, −2.9, +7.7, −0.6, −0.7, +3.7 pts; mean +2.3).  Before any
+# current-season games the level is last season's plus this drift.
+SEASON_SCORING_DRIFT = 2.0
+
+# League-games at which the current season's own scoring level gets 50%
+# weight.  The per-team rating blend (K=15 team games) is far too slow for the
+# league level: it kept ≥15% of last season's level all year, which ran every
+# total 3-6 pts low in seasons where scoring rose (2018-19, 2022-23, 2025-26).
+LEAGUE_LEVEL_K_GAMES = 20.0
+
+# Late-season scoring bias: March/April games score higher than the
+# season-to-date average (playoff urgency, tanking, garbage time).  Backtested
+# at half the old 2.0: with the level fix above, the full 2.0 over-projected
+# 2023-24…2025-26 by 0.3-2 pts.
+LATE_SEASON_TOTAL_BIAS = 1.0       # additive points for games in March/April
 
 # Motivation impact on margin (points)
 MOTIVATION_MARGIN_ADJUSTMENTS = {
@@ -143,6 +160,9 @@ def predict_game(
     home_motivation: str = "NEUTRAL",
     away_motivation: str = "NEUTRAL",
     game_date: date | None = None,
+    league_ortg: float | None = None,
+    league_pace: float | None = None,
+    baseline_total: float | None = None,
 ) -> GamePrediction:
     """
     Core prediction model (V2):
@@ -152,7 +172,11 @@ def predict_game(
     4. Estimate total via multiplicative pace-adjusted formula
     5. Apply late-season bias correction
     6. Calculate spread cover probability (σ=11.5)
-    7. Calculate over probability (σ=13.5)
+    7. Calculate over probability (σ=TOTAL_STD_DEV)
+
+    league_ortg / league_pace / baseline_total come from
+    league_scoring_baseline(); without them the total uses the static league
+    averages (see estimate_total).
     """
     # Step 1: Raw NRtg differential (positive = home advantage)
     nrtg_diff = home_adj_nrtg - away_adj_nrtg
@@ -169,6 +193,8 @@ def predict_game(
     projected_total = estimate_total(
         home_adj_ortg, home_adj_drtg, away_adj_ortg, away_adj_drtg,
         home_pace=home_pace, away_pace=away_pace,
+        league_ortg=league_ortg, league_pace=league_pace,
+        baseline_total=baseline_total,
     )
 
     # Step 5: Late-season scoring bias
@@ -229,40 +255,98 @@ def estimate_total(
     away_drtg: float,
     home_pace: float = LEAGUE_AVG_PACE,
     away_pace: float = LEAGUE_AVG_PACE,
+    league_ortg: float | None = None,
+    league_pace: float | None = None,
+    baseline_total: float | None = None,
 ) -> float:
     """
-    Estimate game total points using multiplicative pace-adjusted method.
+    Estimate game total points: league scoring level × matchup factor.
 
-    This is the standard sports analytics approach:
       matchup_pace = geometric_mean(home_pace, away_pace)
-      home_pts = (home_ortg × away_drtg / league_ortg) × matchup_pace / 100
-      away_pts = (away_ortg × home_drtg / league_ortg) × matchup_pace / 100
-      total = home_pts + away_pts
+      efficiency   = (home_ortg × away_drtg + away_ortg × home_drtg) / (2 × league_ortg²)
+      total        = baseline_total × efficiency × matchup_pace / league_pace
+                     + TOTAL_OT_ADJUSTMENT
 
-    The multiplicative formula properly normalizes: if both teams are
-    exactly average, the total equals league_avg_total (≈229.9).
+    league_ortg / league_pace are the league averages of the ratings passed in,
+    so the ratings only say how far a matchup sits from average.  The level
+    itself comes from baseline_total (league_scoring_baseline), which tracks the
+    current season's scoring much faster than the per-team rating blend does.
+    Without a baseline the ratings' own level is used (2 × ORtg × pace / 100).
 
     Geometric mean for pace is more accurate than arithmetic mean because
     pace is a rate, and a very slow team (BOS 98) vs a very fast team
     (MIA 106) doesn't play at 102 — the slow team's half-court style
     pulls pace down more than the fast team pushes it up.
     """
-    # Matchup pace: geometric mean — √(home_pace × away_pace)
+    league_ortg = league_ortg or LEAGUE_AVG_ORTG
+    league_pace = league_pace or LEAGUE_AVG_PACE
+    if baseline_total is None:
+        baseline_total = 2.0 * league_ortg * league_pace / 100.0
+
     matchup_pace = math.sqrt(home_pace * away_pace)
 
-    # Multiplicative efficiency: normalize against league average
-    # This correctly handles the case where two above-average offenses
-    # meet two above-average defenses.
-    home_pts_per_100 = (home_ortg * away_drtg) / LEAGUE_AVG_ORTG
-    away_pts_per_100 = (away_ortg * home_drtg) / LEAGUE_AVG_ORTG
+    # Multiplicative efficiency: two above-average offenses meeting two
+    # below-average defenses compound rather than add.
+    efficiency = (home_ortg * away_drtg + away_ortg * home_drtg) / (2.0 * league_ortg ** 2)
 
-    # Scale by matchup pace (possessions per game)
-    home_pts = home_pts_per_100 * matchup_pace / 100.0
-    away_pts = away_pts_per_100 * matchup_pace / 100.0
-
-    total = home_pts + away_pts
+    total = baseline_total * efficiency * (matchup_pace / league_pace) + TOTAL_OT_ADJUSTMENT
 
     return round(total, 1)
+
+
+def league_scoring_baseline(
+    current: dict[str, dict[str, float]],
+    prior: dict[str, dict[str, float]],
+    blended: dict[str, dict[str, float]],
+    k_games: float = LEAGUE_LEVEL_K_GAMES,
+    drift: float = SEASON_SCORING_DRIFT,
+) -> dict[str, float]:
+    """League scoring level for estimate_total, from team rating tables.
+
+    current / prior: raw per-team ratings {"ortg", "drtg", "pace", "gp"?} for
+    this season and last.  blended: the ratings actually fed to the model.
+
+    Returns:
+      league_ortg / league_pace: averages of the blended ratings (what the
+        matchup factor is measured against).
+      baseline_total: average-matchup regulation total —
+        w × this season's level + (1 − w) × (last season's level + drift),
+        w = league games / (league games + k_games).
+      level_weight: w.
+    """
+    def mean(rows: list[dict[str, float]], key: str, weights: list[float] | None = None) -> float | None:
+        vals = [(float(r[key]), w) for r, w in zip(rows, weights or [1.0] * len(rows)) if r.get(key) is not None]
+        total_w = sum(w for _, w in vals)
+        return sum(v * w for v, w in vals) / total_w if total_w > 0 else None
+
+    def level(ortg: float | None, pace: float | None) -> float | None:
+        return 2.0 * ortg * pace / 100.0 if ortg is not None and pace is not None else None
+
+    blended_rows = list(blended.values())
+    league_ortg = mean(blended_rows, "ortg") or LEAGUE_AVG_ORTG
+    league_drtg = mean(blended_rows, "drtg") or league_ortg
+    league_ortg = (league_ortg + league_drtg) / 2.0
+    league_pace = mean(blended_rows, "pace") or LEAGUE_AVG_PACE
+
+    prior_rows = list(prior.values())
+    prior_level = level(mean(prior_rows, "ortg"), mean(prior_rows, "pace"))
+    if prior_level is None:
+        prior_level = level(LEAGUE_AVG_ORTG, LEAGUE_AVG_PACE)
+    prior_level += drift
+
+    cur_rows = [r for r in current.values() if float(r.get("gp", 0) or 0) > 0]
+    gps = [float(r["gp"]) for r in cur_rows]
+    current_level = level(mean(cur_rows, "ortg", gps), mean(cur_rows, "pace", gps))
+    league_games = sum(gps) / 2.0
+    w = league_games / (league_games + k_games) if current_level is not None and k_games > 0 else 0.0
+
+    baseline = w * current_level + (1.0 - w) * prior_level if w > 0 else prior_level
+    return {
+        "league_ortg": round(league_ortg, 2),
+        "league_pace": round(league_pace, 2),
+        "baseline_total": round(baseline, 2),
+        "level_weight": round(w, 3),
+    }
 
 
 def margin_to_win_probability(margin: float) -> float:

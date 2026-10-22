@@ -22,7 +22,12 @@ from loguru import logger
 
 from app.analytics.edge_calculator import calculate_edge, cap_verdict
 from app.analytics.lineup_adjustment import OnOffSplitModel, compute_player_impact
-from app.analytics.prediction_model import calculate_schedule_modifier, predict_game, SPREAD_TO_WIN_PROB_SIGMA
+from app.analytics.prediction_model import (
+    SPREAD_TO_WIN_PROB_SIGMA,
+    calculate_schedule_modifier,
+    league_scoring_baseline,
+    predict_game,
+)
 from app.analytics.schedule_engine import calculate_schedule_context, determine_motivation
 from app.analytics.roster_prior import (
     compute_roster_priors,
@@ -504,6 +509,18 @@ async def _fetch_team_ratings(
                     settings.roster_turnover_stale_threshold,
                 ),
             })
+        # League scoring level for totals — updates much faster than team blends.
+        baseline = league_scoring_baseline(current, prior, result)
+        for row in result.values():
+            row.update({
+                "league_ortg": baseline["league_ortg"],
+                "league_pace": baseline["league_pace"],
+                "league_total": baseline["baseline_total"],
+            })
+        logger.info(
+            f"Totals baseline {baseline['baseline_total']:.1f} "
+            f"({baseline['level_weight']:.0%} {season} scoring level)"
+        )
         avg_w = sum(r["current_weight"] for r in result.values()) / len(result)
         stale = sorted(abbr for abbr, r in result.items() if r["stale_prior"])
         logger.info(
@@ -1078,6 +1095,9 @@ async def _process_single_game(
         total_line=poly_prices.get("total_line"),
         home_pace=home_ratings.get("pace", 102.0),
         away_pace=away_ratings.get("pace", 102.0),
+        league_ortg=home_ratings.get("league_ortg"),
+        league_pace=home_ratings.get("league_pace"),
+        baseline_total=home_ratings.get("league_total"),
         home_motivation=home_motivation.motivation_flag,
         away_motivation=away_motivation.motivation_flag,
         game_date=game_date,
