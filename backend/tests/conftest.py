@@ -43,3 +43,16 @@ def sample_player_absences():
             minutes_share=0.30,
         ),
     ]
+
+
+@pytest.fixture(autouse=True)
+def _reset_db_pool():
+    """Drop pooled asyncpg connections after each test.
+
+    The module-level TestClient runs every request on a fresh event loop, so a
+    connection pooled by one request is bound to a loop that is already closed
+    by the next one ("attached to a different loop").
+    """
+    yield
+    from app.models.database import engine
+    engine.sync_engine.dispose(close=False)
