@@ -1,5 +1,6 @@
 """Game analysis API endpoints — wired to live data pipeline."""
 
+import asyncio
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Query
@@ -10,7 +11,12 @@ from app.schemas.game import DailyAnalysis, GameAnalysis, TeamGameData, TopEdge
 from app.schemas.market import EdgeResult, MarketEdge
 from app.schemas.prediction import DataQuality, GamePrediction
 from app.schemas.team import AdjustedRatings, InjurySchema, ScheduleContext
-from app.services.pipeline import _get_nba_game_date, clear_pipeline_cache, run_daily_pipeline
+from app.services.pipeline import (
+    _get_nba_game_date,
+    clear_pipeline_cache,
+    fetch_schedule,
+    run_daily_pipeline,
+)
 from app.services.prediction_store import list_saved_dates, load_predictions
 
 router = APIRouter(prefix="/games", tags=["Games"])
@@ -28,6 +34,59 @@ class InjuryOverrideRequest(BaseModel):
       "OFF"  = expected to play (0% impact, excluded)
     """
     injury_overrides: dict[str, str] = {}
+    game_date: date | None = None  # slate to recalculate; default = today's
+
+
+# How far ahead the dashboard can look.
+MAX_DAYS_AHEAD = 7
+
+
+def _check_slate_date(game_date: date) -> None:
+    today = _get_nba_game_date()
+    if game_date < today:
+        raise HTTPException(status_code=400, detail="Past dates are in History (/games/history).")
+    if game_date > today + timedelta(days=MAX_DAYS_AHEAD):
+        raise HTTPException(status_code=400, detail=f"At most {MAX_DAYS_AHEAD} days ahead.")
+
+
+@router.get("/schedule", response_model=list[dict])
+async def get_schedule(days: int = Query(MAX_DAYS_AHEAD, ge=0, le=MAX_DAYS_AHEAD)) -> list[dict]:
+    """Today's slate and the next ``days`` NBA dates that have games.
+
+    Returns [{date, games_count, is_today}] (today always included) for the
+    dashboard's date picker.  Schedule only (ESPN), no model run.
+    """
+    today = _get_nba_game_date()
+    dates = [today + timedelta(days=i) for i in range(days + 1)]
+    counts = await asyncio.gather(*(_games_count(d) for d in dates))
+    return [
+        {"date": d.isoformat(), "games_count": n, "is_today": d == today}
+        for d, n in zip(dates, counts, strict=True)
+        if d == today or n
+    ]
+
+
+async def _games_count(game_date: date) -> int:
+    try:
+        return len(await fetch_schedule(game_date))
+    except Exception as e:
+        logger.warning(f"Schedule lookup failed for {game_date}: {e}")
+        return 0
+
+
+@router.get("/date/{game_date}", response_model=DailyAnalysis)
+async def get_games_for_date(game_date: date) -> DailyAnalysis:
+    """Full analysis for today's slate or an upcoming date (up to a week ahead).
+
+    Upcoming days use today's injury report and whatever Polymarket has listed
+    so far; they are not saved to History until they become today's slate.
+    """
+    _check_slate_date(game_date)
+    try:
+        return await run_daily_pipeline(game_date)
+    except Exception as e:
+        logger.error(f"Pipeline failed for {game_date}: {e}")
+        return DailyAnalysis(date=game_date, games_count=0, games=[], top_edges=[])
 
 
 @router.get("/today", response_model=DailyAnalysis)
@@ -60,8 +119,11 @@ async def get_todays_games_with_overrides(body: InjuryOverrideRequest) -> DailyA
     Bypasses cache so you get fresh recalculation.
     """
     global _last_analysis
+    if body.game_date is not None:
+        _check_slate_date(body.game_date)
     try:
         analysis = await run_daily_pipeline(
+            body.game_date,
             injury_overrides=body.injury_overrides if body.injury_overrides else None,
         )
         _last_analysis = analysis
@@ -69,7 +131,7 @@ async def get_todays_games_with_overrides(body: InjuryOverrideRequest) -> DailyA
     except Exception as e:
         logger.error(f"Pipeline with overrides failed: {e}")
         return DailyAnalysis(
-            date=_get_nba_game_date(),
+            date=body.game_date or _get_nba_game_date(),
             games_count=0,
             games=[],
             top_edges=[],

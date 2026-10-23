@@ -6,7 +6,7 @@ import TopEdges from "@/components/TopEdges";
 import GameCard from "@/components/GameCard";
 import EmptyState from "@/components/EmptyState";
 import type { DailyAnalysis, GameAnalysis } from "@/types/api";
-import { api } from "@/lib/api";
+import { api, type ScheduleEntry } from "@/lib/api";
 import { copyToClipboard, formatPct, formatET, formatSGT, getVerdictBg, formatEdge } from "@/lib/utils";
 
 const AUTO_REFRESH_MS = 5 * 60 * 1000;
@@ -20,6 +20,13 @@ function scrollToGame(gameId: string) {
     el.classList.add("ring-2", "ring-[#2979FF]");
     setTimeout(() => el.classList.remove("ring-2", "ring-[#2979FF]"), 2000);
   }
+}
+
+/** "2026-10-24" → "Sat, Oct 24" */
+function formatSlateDate(iso: string): string {
+  return new Date(`${iso}T12:00:00`).toLocaleDateString("en-US", {
+    weekday: "short", month: "short", day: "numeric",
+  });
 }
 
 /** Get the favored team + prob from a game */
@@ -49,6 +56,13 @@ export default function Dashboard() {
   const overridesRef = useRef<Record<string, string>>({});
   overridesRef.current = injuryOverrides;
 
+  // Slate picker: null = today's slate, else an upcoming YYYY-MM-DD
+  const [schedule, setSchedule] = useState<ScheduleEntry[]>([]);
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const selectedDateRef = useRef<string | null>(null);
+  selectedDateRef.current = selectedDate;
+  const isToday = selectedDate === null;
+
   const loadData = useCallback(async (isRefresh = false) => {
     if (isRefresh) {
       setRefreshing(true);
@@ -58,9 +72,12 @@ export default function Dashboard() {
     try {
       const overrides = overridesRef.current;
       const hasOverrides = Object.keys(overrides).length > 0;
+      const date = selectedDateRef.current;
       const result = hasOverrides
-        ? await api.getTodaysGamesWithOverrides(overrides)
-        : await api.getTodaysGames();
+        ? await api.getGamesWithOverrides(overrides, date)
+        : date
+          ? await api.getGamesForDate(date)
+          : await api.getTodaysGames();
       setData(result);
       setError(null);
       setLastUpdated(new Date());
@@ -79,6 +96,22 @@ export default function Dashboard() {
     timerRef.current = setInterval(() => loadData(true), AUTO_REFRESH_MS);
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [loadData]);
+
+  useEffect(() => {
+    api.getSchedule().then(setSchedule).catch(() => setSchedule([]));
+  }, []);
+
+  /** Switch slate: drop what-if injury toggles (they belong to the old slate) and reload */
+  const handleSelectDate = (value: string) => {
+    const today = schedule.find((d) => d.is_today)?.date;
+    const next = value === today ? null : value;
+    selectedDateRef.current = next;
+    setSelectedDate(next);
+    setInjuryOverrides({});
+    overridesRef.current = {};
+    setExpandedGameId(null);
+    loadData();
+  };
 
   useEffect(() => {
     const hasLiveGame = data?.games?.some((g) => g.live?.game_status === 2);
@@ -102,7 +135,7 @@ export default function Dashboard() {
     setInjuryOverrides((prev) => {
       const next = { ...prev };
       if (mode === "HALF") { delete next[playerName]; } else { next[playerName] = mode; }
-      api.getTodaysGamesWithOverrides(next)
+      api.getGamesWithOverrides(next, selectedDateRef.current)
         .then((result) => { setData(result); setLastUpdated(new Date()); })
         .catch((err) => console.error("Override recalculation failed:", err));
       return next;
@@ -111,6 +144,7 @@ export default function Dashboard() {
 
   const handleCopyFullSlate = async () => {
     try {
+      if (!isToday) throw new Error("AI prompt endpoint covers today's slate only");
       const result = await api.getAiPrompt();
       await copyToClipboard(result.prompt);
       setAiPromptCopied(true);
@@ -165,6 +199,30 @@ export default function Dashboard() {
           </div>
         )}
 
+        {/* Slate picker: today + upcoming days */}
+        {schedule.length > 0 && (
+          <div className="flex flex-wrap items-center gap-3 mb-4">
+            <span className="text-xs text-[#64748b]">Slate:</span>
+            <select
+              value={selectedDate ?? schedule.find((d) => d.is_today)?.date ?? ""}
+              onChange={(e) => handleSelectDate(e.target.value)}
+              className="bg-[#1a2235] border border-[#334155] rounded px-3 py-1.5 text-sm text-[#e2e8f0] font-mono focus:outline-none focus:border-[#2979FF]"
+            >
+              {schedule.map((d) => (
+                <option key={d.date} value={d.date}>
+                  {d.is_today ? "Today — " : ""}{formatSlateDate(d.date)} ({d.games_count} games)
+                </option>
+              ))}
+            </select>
+            {!isToday && (
+              <span className="text-[11px] text-[#94a3b8]">
+                Upcoming: uses today&apos;s injury report and any Polymarket lines posted so far.
+                Not saved to History until game day.
+              </span>
+            )}
+          </div>
+        )}
+
         {data && (
           <>
             {/* Top Edges — clickable */}
@@ -175,7 +233,7 @@ export default function Dashboard() {
               <div className="bg-[#111827] border border-[#1e293b] rounded-lg overflow-hidden mb-6">
                 <div className="px-4 py-2.5 bg-[#1a2235] flex items-center justify-between">
                   <h2 className="text-xs font-semibold text-[#94a3b8] uppercase tracking-wider">
-                    Today&apos;s Slate ({data.games_count} games)
+                    {isToday ? "Today\u2019s Slate" : `${formatSlateDate(data.date)} Slate`} ({data.games_count} games)
                   </h2>
                   <div className="flex items-center gap-2">
                     {lastUpdatedStr && (

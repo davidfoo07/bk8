@@ -29,6 +29,12 @@ export interface SavedDateEntry {
   file_size_kb: number;
 }
 
+export interface ScheduleEntry {
+  date: string;
+  games_count: number;
+  is_today: boolean;
+}
+
 export interface SimBet {
   game: string;
   market_type: string;
@@ -65,11 +71,17 @@ export const api = {
   /** Get full analysis for today's games */
   getTodaysGames: () => fetchJSON<DailyAnalysis>("/games/today"),
 
-  /** Get full analysis with injury overrides (recalculates from scratch) */
-  getTodaysGamesWithOverrides: (injuryOverrides: Record<string, string>) =>
+  /** Today's slate + upcoming dates with games (for the dashboard date picker) */
+  getSchedule: () => fetchJSON<ScheduleEntry[]>("/games/schedule"),
+
+  /** Full analysis for today's slate or an upcoming date (YYYY-MM-DD) */
+  getGamesForDate: (date: string) => fetchJSON<DailyAnalysis>(`/games/date/${date}`),
+
+  /** Recalculate a date's slate (default: today) with injury overrides */
+  getGamesWithOverrides: (injuryOverrides: Record<string, string>, gameDate?: string | null) =>
     fetchJSON<DailyAnalysis>("/games/today", {
       method: "POST",
-      body: JSON.stringify({ injury_overrides: injuryOverrides }),
+      body: JSON.stringify({ injury_overrides: injuryOverrides, game_date: gameDate ?? null }),
     }),
 
   /** Get AI-formatted prompt for today's games */

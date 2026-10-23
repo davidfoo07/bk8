@@ -254,6 +254,12 @@ async def run_daily_pipeline(
         f"{len(top_edges)} edges, {len(warnings)} warnings ==="
     )
 
+    # Persist only the current slate: an upcoming day viewed early would put a
+    # days-old, half-priced prediction into History.  It gets saved (and keeps
+    # updating until tip-off) once it becomes the current slate.
+    if game_date != _get_nba_game_date():
+        return result
+
     # Persist predictions (History) to the database
     try:
         await save_predictions(result)
@@ -332,19 +338,22 @@ async def _recalculate_with_overrides(
 async def _fetch_todays_games(
     game_date: date, warnings: list[str]
 ) -> list[dict[str, Any]]:
-    cache_key = f"schedule_{game_date.isoformat()}"
-    cached = _cache.get(cache_key, ttl_seconds=120)  # 120s TTL — refreshes every 2 min for live scores
-    if cached is not None:
-        logger.info(f"Using cached schedule ({len(cached)} games)")
-        return cached
-
     try:
-        games = await fetch_games(game_date)
+        return await fetch_schedule(game_date)
     except Exception as e:
         logger.error(f"Failed to fetch today's games: {e}")
         warnings.append(f"Schedule fetch failed (ESPN and NBA): {e}")
         return []
-    _cache.set(cache_key, games)  # 120s TTL — refreshes every 2 min for live scores
+
+
+async def fetch_schedule(game_date: date) -> list[dict[str, Any]]:
+    """fetch_games() behind a 2-minute cache (fresh enough for live scores)."""
+    cache_key = f"schedule_{game_date.isoformat()}"
+    cached = _cache.get(cache_key, ttl_seconds=120)
+    if cached is not None:
+        return cached
+    games = await fetch_games(game_date)
+    _cache.set(cache_key, games)
     return games
 
 
