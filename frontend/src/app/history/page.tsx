@@ -67,6 +67,19 @@ function accColor(acc: number | null): string {
   return "#FF1744";
 }
 
+/** Signed line: -2.5 → "-2.5", 2.5 → "+2.5" */
+function fmtLine(n: number): string {
+  return `${n > 0 ? "+" : ""}${n}`;
+}
+
+/** The side the model took against Polymarket's spread — same rule the ✓ is graded on */
+function spreadPick(g: GameResult): string | null {
+  if (g.poly_spread_line == null) return null;
+  return g.model_spread <= g.poly_spread_line
+    ? `${g.home_team} ${fmtLine(g.poly_spread_line)}`
+    : `${g.away_team} ${fmtLine(-g.poly_spread_line)}`;
+}
+
 /** ✓ or ✗ */
 function Grade({ val }: { val: boolean | null }) {
   if (val === true) return <span className="text-[#00C853] font-bold">✓</span>;
@@ -179,7 +192,7 @@ export default function HistoryPage() {
                       <th className="text-center py-2.5 px-1">✓</th>
                       {/* Spread group */}
                       <th className="text-right py-2.5 px-2 border-l border-[#1e293b]">
-                        <span className="text-[#2979FF]">Pred</span> Spread
+                        <span className="text-[#2979FF]">Model</span> Spread Pick
                       </th>
                       <th className="text-right py-2.5 px-2">
                         <span className="text-[#7C4DFF]">Poly</span> Line
@@ -242,7 +255,10 @@ export default function HistoryPage() {
 
                           {/* ── Spread: Pred | Poly Line | Actual | ✓ | Err ── */}
                           <td className="py-2.5 px-2 text-right font-mono text-[#2979FF] border-l border-[#1e293b] whitespace-nowrap">
-                            {g.home_team} {g.model_spread > 0 ? "+" : ""}{g.model_spread.toFixed(1)}
+                            <div>{spreadPick(g) ?? "—"}</div>
+                            <div className="text-[10px] text-[#64748b]">
+                              proj {g.home_team} {fmtLine(Number(g.model_spread.toFixed(1)))}
+                            </div>
                           </td>
                           <td className="py-2.5 px-2 text-right font-mono text-[#7C4DFF] whitespace-nowrap">
                             {g.poly_spread_line != null ? (
@@ -251,7 +267,8 @@ export default function HistoryPage() {
                           </td>
                           <td className="py-2.5 px-2 text-right font-mono whitespace-nowrap">
                             {fin && g.actual_margin != null ? (
-                              <span className="text-[#e2e8f0]">{g.home_team} {g.actual_margin > 0 ? "+" : ""}{g.actual_margin}</span>
+                              // Spread notation like the columns beside it: home won by 8 → "PHI -8"
+                              <span className="text-[#e2e8f0]">{g.home_team} {g.actual_margin < 0 ? "+" : ""}{-g.actual_margin}</span>
                             ) : <span className="text-[#475569]">—</span>}
                           </td>
                           <td className="py-2.5 px-1 text-center"><Grade val={g.spread_cover_correct} /></td>
