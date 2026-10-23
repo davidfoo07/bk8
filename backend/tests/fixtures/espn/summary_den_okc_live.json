@@ -1,0 +1,727 @@
+{
+ "header": {
+  "competitions": [
+   {
+    "competitors": [
+     {
+      "homeAway": "home",
+      "team": {
+       "id": "25",
+       "abbreviation": "OKC",
+       "displayName": "Oklahoma City Thunder"
+      }
+     },
+     {
+      "homeAway": "away",
+      "team": {
+       "id": "7",
+       "abbreviation": "DEN",
+       "displayName": "Denver Nuggets"
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "boxscore": {
+  "players": [
+   {
+    "team": {
+     "id": "7",
+     "abbreviation": "DEN",
+     "displayName": "Denver Nuggets"
+    },
+    "statistics": [
+     {
+      "keys": [
+       "minutes",
+       "points",
+       "fieldGoalsMade-fieldGoalsAttempted",
+       "threePointFieldGoalsMade-threePointFieldGoalsAttempted",
+       "freeThrowsMade-freeThrowsAttempted",
+       "rebounds",
+       "assists",
+       "turnovers",
+       "steals",
+       "blocks",
+       "offensiveRebounds",
+       "defensiveRebounds",
+       "fouls",
+       "plusMinus"
+      ],
+      "athletes": [
+       {
+        "starter": true,
+        "didNotPlay": false,
+        "stats": [
+         "11",
+         "8",
+         "2-3",
+         "0-0",
+         "4-4",
+         "3",
+         "1",
+         "1",
+         "1",
+         "0",
+         "2",
+         "1",
+         "2",
+         "+6"
+        ],
+        "athlete": {
+         "id": "3064290",
+         "displayName": "Aaron Gordon",
+         "position": {
+          "abbreviation": "F"
+         }
+        }
+       },
+       {
+        "starter": true,
+        "didNotPlay": false,
+        "stats": [
+         "11",
+         "5",
+         "2-3",
+         "1-1",
+         "0-0",
+         "2",
+         "1",
+         "0",
+         "0",
+         "0",
+         "0",
+         "2",
+         "2",
+         "+2"
+        ],
+        "athlete": {
+         "id": "3138196",
+         "displayName": "Cameron Johnson",
+         "position": {
+          "abbreviation": "F"
+         }
+        }
+       },
+       {
+        "starter": true,
+        "didNotPlay": false,
+        "stats": [
+         "13",
+         "7",
+         "3-9",
+         "1-4",
+         "0-0",
+         "2",
+         "2",
+         "0",
+         "1",
+         "0",
+         "0",
+         "2",
+         "1",
+         "+2"
+        ],
+        "athlete": {
+         "id": "3112335",
+         "displayName": "Nikola Jokic",
+         "position": {
+          "abbreviation": "C"
+         }
+        }
+       },
+       {
+        "starter": true,
+        "didNotPlay": false,
+        "stats": [
+         "13",
+         "5",
+         "2-8",
+         "0-1",
+         "1-2",
+         "5",
+         "1",
+         "2",
+         "0",
+         "0",
+         "0",
+         "5",
+         "0",
+         "+3"
+        ],
+        "athlete": {
+         "id": "3936299",
+         "displayName": "Jamal Murray",
+         "position": {
+          "abbreviation": "G"
+         }
+        }
+       },
+       {
+        "starter": true,
+        "didNotPlay": false,
+        "stats": [
+         "10",
+         "5",
+         "2-3",
+         "1-2",
+         "0-0",
+         "1",
+         "1",
+         "0",
+         "0",
+         "0",
+         "1",
+         "0",
+         "0",
+         "+2"
+        ],
+        "athlete": {
+         "id": "4431767",
+         "displayName": "Christian Braun",
+         "position": {
+          "abbreviation": "G"
+         }
+        }
+       },
+       {
+        "starter": false,
+        "didNotPlay": false,
+        "stats": [
+         "7",
+         "2",
+         "1-1",
+         "0-0",
+         "0-0",
+         "1",
+         "1",
+         "1",
+         "0",
+         "0",
+         "1",
+         "0",
+         "1",
+         "+2"
+        ],
+        "athlete": {
+         "id": "4065813",
+         "displayName": "Alpha Diallo",
+         "position": {
+          "abbreviation": "F"
+         }
+        }
+       },
+       {
+        "starter": false,
+        "didNotPlay": false,
+        "stats": [
+         "7",
+         "2",
+         "1-2",
+         "0-0",
+         "0-0",
+         "2",
+         "0",
+         "1",
+         "0",
+         "0",
+         "1",
+         "1",
+         "1",
+         "+5"
+        ],
+        "athlete": {
+         "id": "4277848",
+         "displayName": "Marvin Bagley III",
+         "position": {
+          "abbreviation": "F"
+         }
+        }
+       },
+       {
+        "starter": false,
+        "didNotPlay": false,
+        "stats": [
+         "9",
+         "2",
+         "0-3",
+         "0-2",
+         "2-2",
+         "8",
+         "0",
+         "1",
+         "0",
+         "0",
+         "3",
+         "5",
+         "2",
+         "+1"
+        ],
+        "athlete": {
+         "id": "4698719",
+         "displayName": "Trevon Brazile",
+         "position": {
+          "abbreviation": "F"
+         }
+        }
+       },
+       {
+        "starter": false,
+        "didNotPlay": false,
+        "stats": [
+         "12",
+         "5",
+         "2-4",
+         "0-1",
+         "1-2",
+         "2",
+         "0",
+         "2",
+         "0",
+         "0",
+         "1",
+         "1",
+         "1",
+         "+8"
+        ],
+        "athlete": {
+         "id": "3978",
+         "displayName": "DeMar DeRozan",
+         "position": {
+          "abbreviation": "G"
+         }
+        }
+       },
+       {
+        "starter": false,
+        "didNotPlay": false,
+        "stats": [
+         "7",
+         "2",
+         "1-2",
+         "0-0",
+         "0-0",
+         "0",
+         "0",
+         "0",
+         "1",
+         "0",
+         "0",
+         "0",
+         "1",
+         "+4"
+        ],
+        "athlete": {
+         "id": "3135046",
+         "displayName": "Tyus Jones",
+         "position": {
+          "abbreviation": "G"
+         }
+        }
+       },
+       {
+        "starter": false,
+        "didNotPlay": true,
+        "stats": [],
+        "athlete": {
+         "id": "4431690",
+         "displayName": "Zeke Nnaji",
+         "position": {
+          "abbreviation": "F"
+         }
+        }
+       },
+       {
+        "starter": false,
+        "didNotPlay": true,
+        "stats": [],
+        "athlete": {
+         "id": "4433607",
+         "displayName": "DaRon Holmes II",
+         "position": {
+          "abbreviation": "F"
+         }
+        }
+       },
+       {
+        "starter": false,
+        "didNotPlay": true,
+        "stats": [],
+        "athlete": {
+         "id": "4565698",
+         "displayName": "Bryce Hopkins",
+         "position": {
+          "abbreviation": "F"
+         }
+        }
+       },
+       {
+        "starter": false,
+        "didNotPlay": true,
+        "stats": [],
+        "athlete": {
+         "id": "4433629",
+         "displayName": "Ryan Nembhard",
+         "position": {
+          "abbreviation": "G"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "team": {
+     "id": "25",
+     "abbreviation": "OKC",
+     "displayName": "Oklahoma City Thunder"
+    },
+    "statistics": [
+     {
+      "keys": [
+       "minutes",
+       "points",
+       "fieldGoalsMade-fieldGoalsAttempted",
+       "threePointFieldGoalsMade-threePointFieldGoalsAttempted",
+       "freeThrowsMade-freeThrowsAttempted",
+       "rebounds",
+       "assists",
+       "turnovers",
+       "steals",
+       "blocks",
+       "offensiveRebounds",
+       "defensiveRebounds",
+       "fouls",
+       "plusMinus"
+      ],
+      "athletes": [
+       {
+        "starter": true,
+        "didNotPlay": false,
+        "stats": [
+         "7",
+         "2",
+         "1-4",
+         "0-0",
+         "0-0",
+         "0",
+         "1",
+         "0",
+         "0",
+         "1",
+         "0",
+         "0",
+         "0",
+         "-2"
+        ],
+        "athlete": {
+         "id": "4222252",
+         "displayName": "Isaiah Hartenstein",
+         "position": {
+          "abbreviation": "C"
+         }
+        }
+       },
+       {
+        "starter": true,
+        "didNotPlay": false,
+        "stats": [
+         "9",
+         "4",
+         "2-2",
+         "0-0",
+         "0-0",
+         "2",
+         "2",
+         "0",
+         "1",
+         "2",
+         "1",
+         "1",
+         "1",
+         "-4"
+        ],
+        "athlete": {
+         "id": "4433255",
+         "displayName": "Chet Holmgren",
+         "position": {
+          "abbreviation": "C"
+         }
+        }
+       },
+       {
+        "starter": true,
+        "didNotPlay": false,
+        "stats": [
+         "13",
+         "0",
+         "0-4",
+         "0-3",
+         "0-0",
+         "2",
+         "1",
+         "0",
+         "0",
+         "0",
+         "0",
+         "2",
+         "0",
+         "-2"
+        ],
+        "athlete": {
+         "id": "4278073",
+         "displayName": "Shai Gilgeous-Alexander",
+         "position": {
+          "abbreviation": "G"
+         }
+        }
+       },
+       {
+        "starter": true,
+        "didNotPlay": false,
+        "stats": [
+         "16",
+         "10",
+         "3-7",
+         "2-4",
+         "2-2",
+         "3",
+         "1",
+         "1",
+         "0",
+         "0",
+         "0",
+         "3",
+         "2",
+         "-10"
+        ],
+        "athlete": {
+         "id": "4593803",
+         "displayName": "Jalen Williams",
+         "position": {
+          "abbreviation": "G"
+         }
+        }
+       },
+       {
+        "starter": true,
+        "didNotPlay": false,
+        "stats": [
+         "7",
+         "3",
+         "1-3",
+         "1-3",
+         "0-0",
+         "0",
+         "0",
+         "0",
+         "0",
+         "0",
+         "0",
+         "0",
+         "1",
+         "-5"
+        ],
+        "athlete": {
+         "id": "4683692",
+         "displayName": "Cason Wallace",
+         "position": {
+          "abbreviation": "G"
+         }
+        }
+       },
+       {
+        "starter": false,
+        "didNotPlay": false,
+        "stats": [
+         "9",
+         "3",
+         "1-3",
+         "1-3",
+         "0-0",
+         "3",
+         "2",
+         "0",
+         "0",
+         "0",
+         "0",
+         "3",
+         "1",
+         "+1"
+        ],
+        "athlete": {
+         "id": "4432823",
+         "displayName": "Jaylin Williams",
+         "position": {
+          "abbreviation": "F"
+         }
+        }
+       },
+       {
+        "starter": false,
+        "didNotPlay": false,
+        "stats": [
+         "7",
+         "2",
+         "1-2",
+         "0-0",
+         "0-0",
+         "2",
+         "0",
+         "1",
+         "0",
+         "1",
+         "2",
+         "0",
+         "1",
+         "-5"
+        ],
+        "athlete": {
+         "id": "5174983",
+         "displayName": "Aday Mara",
+         "position": {
+          "abbreviation": "C"
+         }
+        }
+       },
+       {
+        "starter": false,
+        "didNotPlay": false,
+        "stats": [
+         "9",
+         "4",
+         "2-4",
+         "0-2",
+         "0-0",
+         "2",
+         "2",
+         "0",
+         "0",
+         "1",
+         "1",
+         "1",
+         "1",
+         "+2"
+        ],
+        "athlete": {
+         "id": "2991350",
+         "displayName": "Alex Caruso",
+         "position": {
+          "abbreviation": "G"
+         }
+        }
+       },
+       {
+        "starter": false,
+        "didNotPlay": false,
+        "stats": [
+         "4",
+         "0",
+         "0-0",
+         "0-0",
+         "0-0",
+         "1",
+         "1",
+         "0",
+         "0",
+         "0",
+         "0",
+         "1",
+         "1",
+         "-4"
+        ],
+        "athlete": {
+         "id": "3133626",
+         "displayName": "Kenrich Williams",
+         "position": {
+          "abbreviation": "G"
+         }
+        }
+       },
+       {
+        "starter": false,
+        "didNotPlay": false,
+        "stats": [
+         "10",
+         "2",
+         "1-5",
+         "0-3",
+         "0-0",
+         "0",
+         "1",
+         "0",
+         "0",
+         "0",
+         "0",
+         "0",
+         "0",
+         "-3"
+        ],
+        "athlete": {
+         "id": "4683778",
+         "displayName": "Jared McCain",
+         "position": {
+          "abbreviation": "G"
+         }
+        }
+       },
+       {
+        "starter": false,
+        "didNotPlay": false,
+        "stats": [
+         "10",
+         "6",
+         "3-7",
+         "0-3",
+         "0-0",
+         "0",
+         "0",
+         "3",
+         "2",
+         "0",
+         "0",
+         "0",
+         "1",
+         "-3"
+        ],
+        "athlete": {
+         "id": "4900671",
+         "displayName": "Ajay Mitchell",
+         "position": {
+          "abbreviation": "G"
+         }
+        }
+       },
+       {
+        "starter": false,
+        "didNotPlay": true,
+        "stats": [],
+        "athlete": {
+         "id": "4684208",
+         "displayName": "Brooks Barnhizer",
+         "position": {
+          "abbreviation": "F"
+         }
+        }
+       },
+       {
+        "starter": false,
+        "didNotPlay": true,
+        "stats": [],
+        "athlete": {
+         "id": "5241364",
+         "displayName": "Bennett Stirtz",
+         "position": {
+          "abbreviation": "G"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ }
+}

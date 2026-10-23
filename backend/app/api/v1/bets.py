@@ -10,23 +10,12 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.connectors.nba_api import NBAApiConnector
 from app.models.database import get_db
 from app.models.tables import Bet
 from app.schemas.bet import BetCreate, BetHistoryResponse, BetResponse
+from app.services.pipeline import fetch_scores
 
 router = APIRouter(prefix="/bets", tags=["Bets"])
-
-NBA_TEAM_ID_TO_ABBR: dict[int, str] = {
-    1610612737: "ATL", 1610612738: "BOS", 1610612751: "BKN", 1610612766: "CHA",
-    1610612741: "CHI", 1610612739: "CLE", 1610612742: "DAL", 1610612743: "DEN",
-    1610612765: "DET", 1610612744: "GSW", 1610612745: "HOU", 1610612754: "IND",
-    1610612746: "LAC", 1610612747: "LAL", 1610612763: "MEM", 1610612748: "MIA",
-    1610612749: "MIL", 1610612750: "MIN", 1610612740: "NOP", 1610612752: "NYK",
-    1610612760: "OKC", 1610612753: "ORL", 1610612755: "PHI", 1610612756: "PHX",
-    1610612757: "POR", 1610612758: "SAC", 1610612759: "SAS", 1610612761: "TOR",
-    1610612762: "UTA", 1610612764: "WAS",
-}
 
 ABBR_TO_NICKNAME: dict[str, str] = {
     "ATL": "hawks", "BOS": "celtics", "BKN": "nets", "CHA": "hornets",
@@ -175,27 +164,14 @@ async def resolve_bets(db: AsyncSession = Depends(get_db)) -> dict:
             dates_needed.add(d)
 
     actuals: dict[str, dict] = {}
-    nba = NBAApiConnector()
     try:
         for game_date in dates_needed:
-            raw_games = await nba.get_todays_games(game_date)
-            for g in raw_games:
-                home_team = g.get("homeTeam", {})
-                away_team = g.get("awayTeam", {})
-                ht_id = home_team.get("teamId", 0)
-                at_id = away_team.get("teamId", 0)
-                ht = NBA_TEAM_ID_TO_ABBR.get(ht_id, home_team.get("teamTricode", "???"))
-                at = NBA_TEAM_ID_TO_ABBR.get(at_id, away_team.get("teamTricode", "???"))
-                hs = int(home_team.get("score", 0) or 0)
-                as_ = int(away_team.get("score", 0) or 0)
-                status = g.get("gameStatus", 1)
-                if status == 3:
-                    actuals[f"{at}_{ht}"] = {"home_score": hs, "away_score": as_}
+            for key, score in (await fetch_scores(game_date)).items():
+                if score["status"] == 3:
+                    actuals[key] = score
     except Exception as e:
         logger.error(f"Failed to fetch scores for bet resolution: {e}")
-        raise HTTPException(status_code=502, detail=f"NBA API error: {e}")
-    finally:
-        await nba.close()
+        raise HTTPException(status_code=502, detail=f"Score fetch error: {e}")
 
     resolved_count = 0
     wins = 0

@@ -39,7 +39,9 @@ from app.analytics.roster_prior import (
 )
 from app.analytics.season_blend import blend_player_metrics, blend_team_ratings
 from app.config import current_season, previous_season, settings
+from app.connectors.espn import ESPNConnector
 from app.connectors.injuries import InjuryFeedConnector
+from app.connectors import nba_api
 from app.connectors.nba_api import NBAApiConnector
 from app.connectors.pbpstats import PBPStatsConnector
 from app.connectors.polymarket import PolymarketConnector
@@ -332,95 +334,133 @@ async def _fetch_todays_games(
         logger.info(f"Using cached schedule ({len(cached)} games)")
         return cached
 
-    nba = NBAApiConnector()
     try:
-        raw_games = await nba.get_todays_games(game_date)
-        games = []
-        for g in raw_games:
-            home_team = _resolve_team_abbr(g, "homeTeam")
-            away_team = _resolve_team_abbr(g, "awayTeam")
-            if not home_team or not away_team:
-                logger.warning(f"Could not resolve teams for game: {g}")
-                continue
-
-            tipoff = None
-            game_time_utc = g.get("gameTimeUTC") or g.get("gameEt") or g.get("gameDateTimeUtc")
-            if game_time_utc:
-                try:
-                    tipoff = datetime.fromisoformat(game_time_utc.replace("Z", "+00:00"))
-                except (ValueError, AttributeError):
-                    pass
-
-            game_id = f"{game_date.isoformat()}_{away_team}_{home_team}"
-            venue = g.get("arenaName", "") or g.get("arena", {}).get("arenaName", "") or ""
-
-            # Live game state from scoreboardv3
-            game_status = g.get("gameStatus", 1)
-            game_status_text = g.get("gameStatusText", "")
-            period = g.get("period", 0)
-            game_clock_raw = g.get("gameClock", "") or ""
-            nba_game_id = g.get("gameId", "")
-
-            # Parse ISO 8601 game clock "PT05M47.00S" → "5:47"
-            game_clock = _parse_game_clock(game_clock_raw)
-
-            home_team_data = g.get("homeTeam", {})
-            away_team_data = g.get("awayTeam", {})
-            home_score = home_team_data.get("score", 0) or 0
-            away_score = away_team_data.get("score", 0) or 0
-
-            # Quarter-by-quarter scores
-            home_periods = [
-                {"period": p.get("period", 0), "score": p.get("score", 0)}
-                for p in (home_team_data.get("periods") or [])
-            ]
-            away_periods = [
-                {"period": p.get("period", 0), "score": p.get("score", 0)}
-                for p in (away_team_data.get("periods") or [])
-            ]
-
-            # Game leaders
-            home_leader = {}
-            away_leader = {}
-            leaders = g.get("gameLeaders", {})
-            if leaders:
-                hl = leaders.get("homeLeaders", {})
-                al = leaders.get("awayLeaders", {})
-                if hl.get("name"):
-                    home_leader = {"name": hl["name"], "points": hl.get("points", 0),
-                                   "rebounds": hl.get("rebounds", 0), "assists": hl.get("assists", 0)}
-                if al.get("name"):
-                    away_leader = {"name": al["name"], "points": al.get("points", 0),
-                                   "rebounds": al.get("rebounds", 0), "assists": al.get("assists", 0)}
-
-            games.append({
-                "game_id": game_id,
-                "home_team": home_team,
-                "away_team": away_team,
-                "tipoff": tipoff,
-                "venue": venue,
-                "raw": g,
-                # Live game state
-                "game_status": game_status,
-                "game_status_text": game_status_text,
-                "period": period,
-                "game_clock": game_clock,
-                "nba_game_id": nba_game_id,
-                "home_score": home_score,
-                "away_score": away_score,
-                "home_periods": home_periods,
-                "away_periods": away_periods,
-                "home_leader": home_leader,
-                "away_leader": away_leader,
-            })
-        _cache.set(cache_key, games)  # 120s TTL — refreshes every 2 min for live scores
-        return games
+        games = await fetch_games(game_date)
     except Exception as e:
         logger.error(f"Failed to fetch today's games: {e}")
-        warnings.append(f"NBA schedule fetch failed: {e}")
+        warnings.append(f"Schedule fetch failed (ESPN and NBA): {e}")
         return []
+    _cache.set(cache_key, games)  # 120s TTL — refreshes every 2 min for live scores
+    return games
+
+
+async def fetch_games(game_date: date) -> list[dict[str, Any]]:
+    """Games for an NBA date with live state — ESPN first, stats.nba.com fallback.
+
+    Normalized dicts (game_id, teams, tipoff, status, clock, scores, periods,
+    leaders, plus espn_event_id or nba_game_id for the box score).  Raises if
+    both sources fail.
+    """
+    espn = ESPNConnector()
+    try:
+        games = await espn.get_games(game_date)
+        logger.info(f"Schedule from ESPN: {len(games)} games on {game_date}")
+        return games
+    except Exception as e:
+        logger.warning(f"ESPN schedule failed for {game_date}, trying NBA: {e}")
+    finally:
+        await espn.close()
+
+    nba = NBAApiConnector()
+    try:
+        return _normalize_nba_games(await nba.get_todays_games(game_date), game_date)
     finally:
         await nba.close()
+
+
+async def fetch_scores(game_date: date) -> dict[str, dict[str, int]]:
+    """{"AWAY_HOME": {home_score, away_score, status}} for an NBA date."""
+    return {
+        f"{g['away_team']}_{g['home_team']}": {
+            "home_score": g["home_score"],
+            "away_score": g["away_score"],
+            "status": g["game_status"],
+        }
+        for g in await fetch_games(game_date)
+    }
+
+
+def _normalize_nba_games(raw_games: list[dict[str, Any]], game_date: date) -> list[dict[str, Any]]:
+    """stats.nba.com scoreboardv3 games → normalized game dicts."""
+    games = []
+    for g in raw_games:
+        home_team = _resolve_team_abbr(g, "homeTeam")
+        away_team = _resolve_team_abbr(g, "awayTeam")
+        if not home_team or not away_team:
+            logger.warning(f"Could not resolve teams for game: {g}")
+            continue
+
+        tipoff = None
+        game_time_utc = g.get("gameTimeUTC") or g.get("gameEt") or g.get("gameDateTimeUtc")
+        if game_time_utc:
+            try:
+                tipoff = datetime.fromisoformat(game_time_utc.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                pass
+
+        game_id = f"{game_date.isoformat()}_{away_team}_{home_team}"
+        venue = g.get("arenaName", "") or g.get("arena", {}).get("arenaName", "") or ""
+
+        # Live game state from scoreboardv3
+        game_status = g.get("gameStatus", 1)
+        game_status_text = g.get("gameStatusText", "")
+        period = g.get("period", 0)
+        game_clock_raw = g.get("gameClock", "") or ""
+        nba_game_id = g.get("gameId", "")
+
+        # Parse ISO 8601 game clock "PT05M47.00S" → "5:47"
+        game_clock = _parse_game_clock(game_clock_raw)
+
+        home_team_data = g.get("homeTeam", {})
+        away_team_data = g.get("awayTeam", {})
+        home_score = home_team_data.get("score", 0) or 0
+        away_score = away_team_data.get("score", 0) or 0
+
+        # Quarter-by-quarter scores
+        home_periods = [
+            {"period": p.get("period", 0), "score": p.get("score", 0)}
+            for p in (home_team_data.get("periods") or [])
+        ]
+        away_periods = [
+            {"period": p.get("period", 0), "score": p.get("score", 0)}
+            for p in (away_team_data.get("periods") or [])
+        ]
+
+        # Game leaders
+        home_leader = {}
+        away_leader = {}
+        leaders = g.get("gameLeaders", {})
+        if leaders:
+            hl = leaders.get("homeLeaders", {})
+            al = leaders.get("awayLeaders", {})
+            if hl.get("name"):
+                home_leader = {"name": hl["name"], "points": hl.get("points", 0),
+                               "rebounds": hl.get("rebounds", 0), "assists": hl.get("assists", 0)}
+            if al.get("name"):
+                away_leader = {"name": al["name"], "points": al.get("points", 0),
+                               "rebounds": al.get("rebounds", 0), "assists": al.get("assists", 0)}
+
+        games.append({
+            "game_id": game_id,
+            "home_team": home_team,
+            "away_team": away_team,
+            "tipoff": tipoff,
+            "venue": venue,
+            "raw": g,
+            # Live game state
+            "game_status": game_status,
+            "game_status_text": game_status_text,
+            "period": period,
+            "game_clock": game_clock,
+            "nba_game_id": nba_game_id,
+            "home_score": home_score,
+            "away_score": away_score,
+            "home_periods": home_periods,
+            "away_periods": away_periods,
+            "home_leader": home_leader,
+            "away_leader": away_leader,
+        })
+    return games
 
 
 def _resolve_team_abbr(game_data: dict, team_key: str) -> str | None:
@@ -462,6 +502,7 @@ async def _fetch_team_ratings(
     if cached:
         return cached
 
+    nba_api.stale_endpoints.clear()
     season = current_season()
     prior_season = previous_season(season)
 
@@ -471,6 +512,12 @@ async def _fetch_team_ratings(
         _fetch_rosters(season, warnings),
         _fetch_rosters(prior_season, warnings, ttl_seconds=86400),
         _fetch_season_player_metrics(prior_season, warnings, ttl_seconds=86400),
+    )
+
+    current_rosters = await _fill_rosters_from_espn(
+        current_rosters,
+        {**prior_players, **(_cache.get(f"player_metrics_{season}", 86400) or {})},
+        warnings,
     )
 
     result: dict[str, dict[str, float]] = {}
@@ -527,6 +574,13 @@ async def _fetch_team_ratings(
             f"{len(roster_priors)} roster priors / {prior_season} ({len(prior)} teams), "
             f"avg current weight {avg_w:.0%}, stale priors: {stale or 'none'}"
         )
+        if nba_api.stale_endpoints:
+            for row in result.values():
+                row["stale_source"] = True
+            warnings.append(
+                "NBA stats unavailable — using the last saved copy "
+                f"({', '.join(sorted(nba_api.stale_endpoints))})."
+            )
         _cache.set("team_ratings", result)
 
     # Fallback: estimate from standings
@@ -619,6 +673,46 @@ async def _fetch_rosters(
         logger.info(f"Fetched {season} rosters for {len(result)} teams")
         _cache.set(cache_key, result)
     return result
+
+
+async def _fill_rosters_from_espn(
+    rosters: dict[str, list[int]],
+    players_by_name: dict[str, dict[str, Any]],
+    warnings: list[str],
+) -> dict[str, list[int]]:
+    """Fill teams missing an NBA roster from ESPN's, matched to NBA ids by name.
+
+    Players with no NBA stats yet (rookies) can't be matched and are left out.
+    """
+    missing = [abbr for abbr in NBA_TEAM_ID_TO_ABBR.values() if abbr not in rosters]
+    if not missing or not players_by_name:
+        return rosters
+
+    id_by_name = {
+        name.lower(): int(row["PLAYER_ID"])
+        for name, row in players_by_name.items()
+        if row.get("PLAYER_ID")
+    }
+    espn = ESPNConnector()
+    filled = dict(rosters)
+    try:
+        for abbr in missing:
+            try:
+                names = await espn.get_roster_names(abbr)
+            except Exception as e:
+                logger.warning(f"ESPN roster failed for {abbr}: {e}")
+                continue
+            ids = [id_by_name[n.lower()] for n in names if n.lower() in id_by_name]
+            if len(ids) >= _MIN_ROSTER_SIZE:
+                filled[abbr] = ids
+    finally:
+        await espn.close()
+
+    added = len(filled) - len(rosters)
+    if added:
+        logger.info(f"Filled {added} rosters from ESPN")
+        warnings.append(f"{added} team rosters taken from ESPN (NBA rosters unavailable).")
+    return filled
 
 
 def _metrics_by_player_id(metrics: dict[str, dict[str, Any]]) -> dict[int, dict[str, Any]]:
@@ -837,16 +931,37 @@ async def _fetch_season_player_metrics(
 
 # ─── Live Box Score Fetching ────────────────────────────────────────
 
-async def _fetch_live_boxscore(nba_game_id: str) -> tuple[list[LivePlayerStats], list[LivePlayerStats]]:
+async def _fetch_live_boxscore(
+    game_raw: dict[str, Any],
+) -> tuple[list[LivePlayerStats], list[LivePlayerStats]]:
     """Fetch live per-player box score for an in-progress game.
-    Returns (home_players, away_players)."""
-    if not nba_game_id:
+    Returns (home_players, away_players).  ESPN first, stats.nba.com fallback."""
+    espn_id = game_raw.get("espn_event_id", "")
+    nba_game_id = game_raw.get("nba_game_id", "")
+    if not espn_id and not nba_game_id:
         return [], []
 
-    cache_key = f"boxscore_{nba_game_id}"
+    cache_key = f"boxscore_{espn_id or nba_game_id}"
     cached = _cache.get(cache_key, ttl_seconds=60)  # 60s cache for live data
     if cached is not None:
         return cached
+
+    if espn_id:
+        espn = ESPNConnector()
+        try:
+            home_raw, away_raw = await espn.get_boxscore(espn_id)
+            result = (
+                _sort_by_minutes([LivePlayerStats(**p) for p in home_raw]),
+                _sort_by_minutes([LivePlayerStats(**p) for p in away_raw]),
+            )
+            _cache.set(cache_key, result)
+            return result
+        except Exception as e:
+            logger.warning(f"ESPN boxscore failed for event {espn_id}: {e}")
+            if not nba_game_id:
+                return [], []
+        finally:
+            await espn.close()
 
     nba = NBAApiConnector()
     try:
@@ -896,9 +1011,11 @@ def _parse_boxscore_players(players_raw: list[dict]) -> list[LivePlayerStats]:
             ft_pct=float(stats.get("freeThrowsPercentage", 0) or 0),
         ))
 
-    # Sort by minutes played descending
-    result.sort(key=lambda p: _minutes_to_float(p.minutes), reverse=True)
-    return result
+    return _sort_by_minutes(result)
+
+
+def _sort_by_minutes(players: list[LivePlayerStats]) -> list[LivePlayerStats]:
+    return sorted(players, key=lambda p: _minutes_to_float(p.minutes), reverse=True)
 
 
 def _minutes_to_float(mins_str: str) -> float:
@@ -1319,7 +1436,11 @@ async def _process_single_game(
 
     # Data quality
     data_quality = DataQuality(
-        ratings_freshness="FRESH" if ratings_data else "MISSING",
+        ratings_freshness=(
+            "MISSING" if not ratings_data
+            else "STALE" if home_ratings.get("stale_source") or away_ratings.get("stale_source")
+            else "FRESH"
+        ),
         injury_freshness="FRESH" if injuries_data else "MISSING",
         price_freshness="FRESH" if poly_prices else "MISSING",
         cross_source_validated=bool(ratings_data and standings_data),
@@ -1342,9 +1463,9 @@ async def _process_single_game(
     )
 
     # Live box score for in-progress games
-    if game_raw.get("game_status") == 2 and nba_game_id:
+    if game_raw.get("game_status") == 2:
         try:
-            home_players, away_players = await _fetch_live_boxscore(nba_game_id)
+            home_players, away_players = await _fetch_live_boxscore(game_raw)
             live_state.home_players = home_players
             live_state.away_players = away_players
         except Exception as e:

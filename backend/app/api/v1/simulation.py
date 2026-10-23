@@ -17,19 +17,9 @@ from sqlalchemy import select, text
 from app.connectors.nba_api import NBAApiConnector
 from app.models.database import async_session_factory
 from app.models.tables import MarketSnapshot
+from app.services.pipeline import fetch_scores
 
 router = APIRouter(prefix="/simulation", tags=["Simulation"])
-
-NBA_TEAM_ID_TO_ABBR: dict[int, str] = {
-    1610612737: "ATL", 1610612738: "BOS", 1610612751: "BKN", 1610612766: "CHA",
-    1610612741: "CHI", 1610612739: "CLE", 1610612742: "DAL", 1610612743: "DEN",
-    1610612765: "DET", 1610612744: "GSW", 1610612745: "HOU", 1610612754: "IND",
-    1610612746: "LAC", 1610612747: "LAL", 1610612763: "MEM", 1610612748: "MIA",
-    1610612749: "MIL", 1610612750: "MIN", 1610612740: "NOP", 1610612752: "NYK",
-    1610612760: "OKC", 1610612753: "ORL", 1610612755: "PHI", 1610612756: "PHX",
-    1610612757: "POR", 1610612758: "SAC", 1610612759: "SAS", 1610612761: "TOR",
-    1610612762: "UTA", 1610612764: "WAS",
-}
 
 KELLY_BANKROLL = 100.0  # $100 virtual bankroll for Kelly-sized bets
 
@@ -134,32 +124,26 @@ def _build_selection_label(
 async def _fetch_final_scores(
     game_date: date,
 ) -> dict[str, dict]:
-    """Fetch final scores for a date.  Uses scoreboardv3 first;
+    """Fetch final scores for a date.  Uses the ESPN scoreboard first;
     if it returns no FINAL games, falls back to leaguegamefinder.
     Returns dict keyed by "AWAY_HOME" → {home_score, away_score}.
     """
-    nba = NBAApiConnector()
     actuals: dict[str, dict] = {}
     try:
-        # Try scoreboardv3 first (works well for recent/today)
-        raw_games = await nba.get_todays_games(game_date)
-        for g in raw_games:
-            ht = g.get("homeTeam", {})
-            at = g.get("awayTeam", {})
-            ht_abbr = NBA_TEAM_ID_TO_ABBR.get(ht.get("teamId", 0), ht.get("teamTricode", "???"))
-            at_abbr = NBA_TEAM_ID_TO_ABBR.get(at.get("teamId", 0), at.get("teamTricode", "???"))
-            hs = int(ht.get("score", 0) or 0)
-            as_ = int(at.get("score", 0) or 0)
-            status = g.get("gameStatus", 1)
-            if status == 3:
-                actuals[f"{at_abbr}_{ht_abbr}"] = {"home_score": hs, "away_score": as_}
-
+        # ESPN scoreboard first (NBA fallback inside), works for any date
+        for key, score in (await fetch_scores(game_date)).items():
+            if score["status"] == 3:
+                actuals[key] = {k: score[k] for k in ("home_score", "away_score")}
         if actuals:
-            logger.info(f"Got {len(actuals)} final scores from scoreboardv3 for {game_date}")
+            logger.info(f"Got {len(actuals)} final scores for {game_date}")
             return actuals
+    except Exception as e:
+        logger.warning(f"Scoreboard fetch failed for {game_date}: {e}")
 
+    nba = NBAApiConnector()
+    try:
         # Fallback: leaguegamefinder (more reliable for historical dates)
-        logger.info(f"scoreboardv3 returned no finals for {game_date}, trying leaguegamefinder")
+        logger.info(f"Scoreboard returned no finals for {game_date}, trying leaguegamefinder")
         client = await nba._get_client()
         params = {
             "LeagueID": "00",

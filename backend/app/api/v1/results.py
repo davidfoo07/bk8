@@ -6,22 +6,10 @@ from fastapi import APIRouter, HTTPException
 from loguru import logger
 from pydantic import BaseModel
 
-from app.connectors.nba_api import NBAApiConnector
-from app.services.prediction_store import load_predictions, list_saved_dates
+from app.services.pipeline import fetch_scores
+from app.services.prediction_store import list_saved_dates, load_predictions
 
 router = APIRouter(prefix="/results", tags=["Results"])
-
-NBA_TEAM_ID_TO_ABBR: dict[int, str] = {
-    1610612737: "ATL", 1610612738: "BOS", 1610612751: "BKN", 1610612766: "CHA",
-    1610612741: "CHI", 1610612739: "CLE", 1610612742: "DAL", 1610612743: "DEN",
-    1610612765: "DET", 1610612744: "GSW", 1610612745: "HOU", 1610612754: "IND",
-    1610612746: "LAC", 1610612747: "LAL", 1610612763: "MEM", 1610612748: "MIA",
-    1610612749: "MIL", 1610612750: "MIN", 1610612740: "NOP", 1610612752: "NYK",
-    1610612760: "OKC", 1610612753: "ORL", 1610612755: "PHI", 1610612756: "PHX",
-    1610612757: "POR", 1610612758: "SAC", 1610612759: "SAS", 1610612761: "TOR",
-    1610612762: "UTA", 1610612764: "WAS",
-}
-
 
 class GameResult(BaseModel):
     game_id: str
@@ -79,27 +67,12 @@ async def get_results_for_date(game_date: str) -> DailyResults:
     if analysis is None:
         raise HTTPException(status_code=404, detail=f"No saved predictions for {game_date}")
 
-    # Fetch actual scores from NBA API
-    nba = NBAApiConnector()
+    # Fetch actual scores (ESPN, NBA fallback)
     actuals: dict[str, dict] = {}
     try:
-        raw_games = await nba.get_todays_games(parsed_date)
-        for g in raw_games:
-            home_team = g.get("homeTeam", {})
-            away_team = g.get("awayTeam", {})
-            ht_id = home_team.get("teamId", 0)
-            at_id = away_team.get("teamId", 0)
-            ht = NBA_TEAM_ID_TO_ABBR.get(ht_id, home_team.get("teamTricode", "???"))
-            at = NBA_TEAM_ID_TO_ABBR.get(at_id, away_team.get("teamTricode", "???"))
-            hs = int(home_team.get("score", 0) or 0)
-            as_ = int(away_team.get("score", 0) or 0)
-            status = g.get("gameStatus", 1)
-            key = f"{at}_{ht}"
-            actuals[key] = {"home_score": hs, "away_score": as_, "status": status}
+        actuals = await fetch_scores(parsed_date)
     except Exception as e:
         logger.warning(f"Failed to fetch actual scores for {game_date}: {e}")
-    finally:
-        await nba.close()
 
     # Build per-game comparisons
     results: list[GameResult] = []

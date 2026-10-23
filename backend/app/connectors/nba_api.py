@@ -2,15 +2,38 @@
 
 from __future__ import annotations
 
+import time
 from datetime import date, datetime
 from typing import Any
 
 import httpx
 from loguru import logger
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from app.config import current_season
+from app.connectors import disk_cache
 from app.connectors.base import BaseConnector
+
+# Season stats change at most daily → keep them on disk this long (seconds).
+DISK_CACHE_TTL: dict[str, int] = {
+    "/teamestimatedmetrics": 6 * 3600,
+    "/leaguedashteamstats": 6 * 3600,
+    "/playerestimatedmetrics": 12 * 3600,
+    "/commonteamroster": 12 * 3600,
+    "/leaguestandingsv3": 3 * 3600,
+    "/teamgamelog": 6 * 3600,
+}
+
+# After a 403 (IP block), stop calling stats.nba.com for this long.
+BLOCK_PAUSE_SECONDS = 15 * 60
+_blocked_until = 0.0
+
+# Endpoints served from a stale disk copy since the last reset (see pipeline).
+stale_endpoints: set[str] = set()
+
+
+class NBABlockedError(Exception):
+    """stats.nba.com refused us (403) or calls are paused after one."""
 
 
 class NBAApiConnector(BaseConnector):
@@ -43,13 +66,48 @@ class NBAApiConnector(BaseConnector):
             )
         return self._client
 
+    async def fetch(self, endpoint: str, params: dict[str, Any] | None = None) -> Any:
+        """Fetch from stats.nba.com through the on-disk cache.
+
+        Season stats (anything in DISK_CACHE_TTL) are served from disk while
+        fresh, so normal use costs ~one request per endpoint per day.  If the
+        API fails — or is paused after a 403 block — the last saved copy is
+        served at any age (recorded in ``stale_endpoints``).  Live endpoints
+        (scoreboard, box score) are never cached.
+        """
+        ttl = DISK_CACHE_TTL.get(endpoint)
+        path = disk_cache.cache_path("nba", endpoint, params) if ttl else None
+        if path is not None:
+            fresh = disk_cache.read(path, ttl)
+            if fresh is not None:
+                return fresh
+
+        try:
+            if _blocked_until > time.monotonic():
+                raise NBABlockedError(f"stats.nba.com paused after 403 ({endpoint})")
+            data = await self._fetch_remote(endpoint, params)
+        except Exception:
+            stale = disk_cache.read(path, None) if path is not None else None
+            if stale is None:
+                raise
+            age = disk_cache.age_hours(path)
+            logger.warning(f"NBA API unavailable — serving cached {endpoint} ({age:.0f}h old)")
+            stale_endpoints.add(endpoint)
+            return stale
+
+        if path is not None:
+            disk_cache.write(path, data)
+        return data
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_not_exception_type(NBABlockedError),
         reraise=True,
     )
-    async def fetch(self, endpoint: str, params: dict[str, Any] | None = None) -> Any:
-        """Fetch data from NBA Stats API with retry logic."""
+    async def _fetch_remote(self, endpoint: str, params: dict[str, Any] | None = None) -> Any:
+        """Fetch data from NBA Stats API with retry logic (no retry once blocked)."""
+        global _blocked_until
         client = await self._get_client()
         try:
             response = await client.get(endpoint, params=params)
@@ -57,6 +115,10 @@ class NBAApiConnector(BaseConnector):
             return response.json()
         except httpx.HTTPStatusError as e:
             logger.error(f"NBA API HTTP error: {e.response.status_code} for {endpoint}")
+            if e.response.status_code == 403:
+                # Akamai block: retrying only prolongs it.  Pause all calls.
+                _blocked_until = time.monotonic() + BLOCK_PAUSE_SECONDS
+                raise NBABlockedError(f"stats.nba.com returned 403 for {endpoint}") from e
             raise
         except httpx.TimeoutException:
             logger.error(f"NBA API timeout for {endpoint}")

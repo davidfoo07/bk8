@@ -57,3 +57,4 @@ codemax_searched_logs/
 
 # Prediction data (local, not committed — regenerated from live APIs)
 backend/data/predictions/
+backend/data/cache/

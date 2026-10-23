@@ -1,0 +1,340 @@
+{
+ "events": [
+  {
+   "id": "401909093",
+   "date": "2026-10-22T23:00Z",
+   "name": "Cleveland Cavaliers at Philadelphia 76ers",
+   "status": {
+    "clock": 0.0,
+    "displayClock": "0.0",
+    "period": 4,
+    "type": {
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "state": "post",
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "shortDetail": "Final"
+    }
+   },
+   "competitions": [
+    {
+     "venue": {
+      "fullName": "Xfinity Mobile Arena"
+     },
+     "competitors": [
+      {
+       "homeAway": "home",
+       "score": "114",
+       "team": {
+        "id": "20",
+        "abbreviation": "PHI",
+        "displayName": "Philadelphia 76ers"
+       },
+       "linescores": [
+        {
+         "value": 18.0
+        },
+        {
+         "value": 27.0
+        },
+        {
+         "value": 37.0
+        },
+        {
+         "value": 32.0
+        }
+       ],
+       "leaders": [
+        {
+         "name": "points",
+         "leaders": [
+          {
+           "value": 32.0,
+           "athlete": {
+            "id": "4431678",
+            "displayName": "Tyrese Maxey"
+           }
+          }
+         ]
+        },
+        {
+         "name": "rebounds",
+         "leaders": [
+          {
+           "value": 10.0,
+           "athlete": {
+            "id": "1966",
+            "displayName": "LeBron James"
+           }
+          }
+         ]
+        },
+        {
+         "name": "assists",
+         "leaders": [
+          {
+           "value": 6.0,
+           "athlete": {
+            "id": "4431678",
+            "displayName": "Tyrese Maxey"
+           }
+          }
+         ]
+        },
+        {
+         "name": "rating",
+         "leaders": [
+          {
+           "value": 48.099998474121094,
+           "athlete": {
+            "id": "4431678",
+            "displayName": "Tyrese Maxey"
+           }
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "homeAway": "away",
+       "score": "106",
+       "team": {
+        "id": "5",
+        "abbreviation": "CLE",
+        "displayName": "Cleveland Cavaliers"
+       },
+       "linescores": [
+        {
+         "value": 35.0
+        },
+        {
+         "value": 34.0
+        },
+        {
+         "value": 21.0
+        },
+        {
+         "value": 16.0
+        }
+       ],
+       "leaders": [
+        {
+         "name": "points",
+         "leaders": [
+          {
+           "value": 32.0,
+           "athlete": {
+            "id": "3908809",
+            "displayName": "Donovan Mitchell"
+           }
+          }
+         ]
+        },
+        {
+         "name": "rebounds",
+         "leaders": [
+          {
+           "value": 10.0,
+           "athlete": {
+            "id": "3908809",
+            "displayName": "Donovan Mitchell"
+           }
+          }
+         ]
+        },
+        {
+         "name": "assists",
+         "leaders": [
+          {
+           "value": 5.0,
+           "athlete": {
+            "id": "3992",
+            "displayName": "James Harden"
+           }
+          }
+         ]
+        },
+        {
+         "name": "rating",
+         "leaders": [
+          {
+           "value": 51.29999923706055,
+           "athlete": {
+            "id": "3908809",
+            "displayName": "Donovan Mitchell"
+           }
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "401909094",
+   "date": "2026-10-23T01:30Z",
+   "name": "Denver Nuggets at Oklahoma City Thunder",
+   "status": {
+    "clock": 210.0,
+    "displayClock": "3:30",
+    "period": 2,
+    "type": {
+     "id": "2",
+     "name": "STATUS_IN_PROGRESS",
+     "state": "in",
+     "completed": false,
+     "description": "In Progress",
+     "detail": "3:30 - 2nd Quarter",
+     "shortDetail": "3:30 - 2nd"
+    }
+   },
+   "competitions": [
+    {
+     "venue": {
+      "fullName": "Paycom Center"
+     },
+     "competitors": [
+      {
+       "homeAway": "home",
+       "score": "36",
+       "team": {
+        "id": "25",
+        "abbreviation": "OKC",
+        "displayName": "Oklahoma City Thunder"
+       },
+       "linescores": [
+        {
+         "value": 24.0
+        },
+        {
+         "value": 12.0
+        }
+       ],
+       "leaders": [
+        {
+         "name": "points",
+         "leaders": [
+          {
+           "value": 10.0,
+           "athlete": {
+            "id": "4593803",
+            "displayName": "Jalen Williams"
+           }
+          }
+         ]
+        },
+        {
+         "name": "rebounds",
+         "leaders": [
+          {
+           "value": 3.0,
+           "athlete": {
+            "id": "4593803",
+            "displayName": "Jalen Williams"
+           }
+          }
+         ]
+        },
+        {
+         "name": "assists",
+         "leaders": [
+          {
+           "value": 2.0,
+           "athlete": {
+            "id": "4433255",
+            "displayName": "Chet Holmgren"
+           }
+          }
+         ]
+        },
+        {
+         "name": "rating",
+         "leaders": [
+          {
+           "value": 15.0,
+           "athlete": {
+            "id": "4593803",
+            "displayName": "Jalen Williams"
+           }
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "homeAway": "away",
+       "score": "43",
+       "team": {
+        "id": "7",
+        "abbreviation": "DEN",
+        "displayName": "Denver Nuggets"
+       },
+       "linescores": [
+        {
+         "value": 27.0
+        },
+        {
+         "value": 16.0
+        }
+       ],
+       "leaders": [
+        {
+         "name": "points",
+         "leaders": [
+          {
+           "value": 8.0,
+           "athlete": {
+            "id": "3064290",
+            "displayName": "Aaron Gordon"
+           }
+          }
+         ]
+        },
+        {
+         "name": "rebounds",
+         "leaders": [
+          {
+           "value": 8.0,
+           "athlete": {
+            "id": "4698719",
+            "displayName": "Trevon Brazile"
+           }
+          }
+         ]
+        },
+        {
+         "name": "assists",
+         "leaders": [
+          {
+           "value": 2.0,
+           "athlete": {
+            "id": "3112335",
+            "displayName": "Nikola Jokic"
+           }
+          }
+         ]
+        },
+        {
+         "name": "rating",
+         "leaders": [
+          {
+           "value": 14.899999618530273,
+           "athlete": {
+            "id": "3064290",
+            "displayName": "Aaron Gordon"
+           }
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
