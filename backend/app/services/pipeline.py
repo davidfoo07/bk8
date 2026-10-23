@@ -19,11 +19,14 @@ from typing import Any
 import re
 
 from loguru import logger
+from scipy.stats import norm
 
 from app.analytics.edge_calculator import calculate_edge, cap_verdict
 from app.analytics.lineup_adjustment import OnOffSplitModel, compute_player_impact
 from app.analytics.prediction_model import (
+    GAME_STD_DEV,
     SPREAD_TO_WIN_PROB_SIGMA,
+    TOTAL_STD_DEV,
     calculate_schedule_modifier,
     league_scoring_baseline,
     predict_game,
@@ -992,6 +995,35 @@ def _calculate_live_prediction(
     )
 
 
+def _live_market_probs(
+    prediction: GamePrediction,
+    live_pred: LivePrediction,
+    home_score: int,
+    away_score: int,
+    spread_line: float | None,
+    total_line: float | None,
+) -> tuple[float, float, float]:
+    """In-game (home win, home cover, over) probabilities.
+
+    Same score + clock blend as the live win probability: the rest of the game
+    is projected at the pre-game rate, and uncertainty shrinks with sqrt(time left).
+    """
+    t = live_pred.time_remaining_pct
+    spread_sd = max(GAME_STD_DEV * math.sqrt(t), 0.5)
+    total_sd = max(TOTAL_STD_DEV * math.sqrt(t), 0.5)
+
+    cover_prob = prediction.spread_cover_prob
+    if spread_line is not None:
+        cover_prob = float(norm.cdf((live_pred.projected_final_margin + spread_line) / spread_sd))
+
+    over_prob = prediction.over_prob
+    if total_line is not None:
+        projected_total = home_score + away_score + prediction.projected_total * t
+        over_prob = float(norm.cdf((projected_total - total_line) / total_sd))
+
+    return live_pred.home_win_prob, round(cover_prob, 4), round(over_prob, 4)
+
+
 # ─── Step 3: Process Single Game ───────────────────────────────────
 
 async def _process_single_game(
@@ -1103,12 +1135,33 @@ async def _process_single_game(
     home_nick = _get_team_nickname(home_abbr).title()  # "Nuggets"
     away_nick = _get_team_nickname(away_abbr).title()  # "Grizzlies"
 
+    # In-game: price edges against the live model, not the stale pre-game one
+    # (Polymarket reprices every possession; the pre-game number doesn't).
+    live_pred = _calculate_live_prediction(
+        pre_game_prediction=prediction,
+        game_status=game_raw.get("game_status", 1),
+        home_score=game_raw.get("home_score", 0),
+        away_score=game_raw.get("away_score", 0),
+        period=game_raw.get("period", 0),
+        game_clock=game_raw.get("game_clock", ""),
+    )
+    is_live = game_raw.get("game_status") == 2 and live_pred is not None
+    ml_prob = prediction.home_win_prob
+    cover_prob = prediction.spread_cover_prob
+    over_prob = prediction.over_prob
+    if is_live:
+        ml_prob, cover_prob, over_prob = _live_market_probs(
+            prediction, live_pred,
+            game_raw.get("home_score", 0), game_raw.get("away_score", 0),
+            poly_prices.get("spread_line"), poly_prices.get("total_line"),
+        )
+
     # Edge calculation with real team names
     markets: dict[str, MarketEdge] = {}
 
     ml_price = poly_prices.get("moneyline_home_yes")
     if ml_price is not None and _is_live_price(ml_price):
-        ml_edge = calculate_edge(prediction.home_win_prob, ml_price)
+        ml_edge = calculate_edge(ml_prob, ml_price)
         # Replace YES/NO with team names in the edge result
         ml_edge_named = EdgeResult(
             yes_edge=ml_edge.yes_edge, no_edge=ml_edge.no_edge,
@@ -1124,7 +1177,7 @@ async def _process_single_game(
             polymarket_home_no=round(1.0 - ml_price, 3),
             home_label=home_nick,
             away_label=away_nick,
-            model_probability=prediction.home_win_prob,
+            model_probability=ml_prob,
             edge=ml_edge_named,
         )
     elif ml_price is not None:
@@ -1142,7 +1195,7 @@ async def _process_single_game(
 
     spread_price = poly_prices.get("spread_home_yes")
     if spread_price is not None and _is_live_price(spread_price):
-        spread_cover_prob = prediction.spread_cover_prob
+        spread_cover_prob = cover_prob
         spread_edge = calculate_edge(spread_cover_prob, spread_price)
         spread_edge_named = EdgeResult(
             yes_edge=spread_edge.yes_edge, no_edge=spread_edge.no_edge,
@@ -1178,7 +1231,6 @@ async def _process_single_game(
 
     total_price = poly_prices.get("total_over_yes")
     if total_price is not None and _is_live_price(total_price):
-        over_prob = prediction.over_prob
         total_edge = calculate_edge(over_prob, total_price)
         total_edge_named = EdgeResult(
             yes_edge=total_edge.yes_edge, no_edge=total_edge.no_edge,
@@ -1231,6 +1283,18 @@ async def _process_single_game(
             f"roster-based rating) — confidence LOW, verdicts capped at LEAN."
         )
         logger.warning(f"  {away_abbr}@{home_abbr}: {game_warnings[-1]}")
+
+    # A score + clock model has no real edge over Polymarket's in-game prices:
+    # show the numbers, never a BUY.
+    if is_live:
+        markets = {
+            key: mkt.model_copy(update={"edge": cap_verdict(mkt.edge, "LEAN")})
+            for key, mkt in markets.items()
+        }
+        game_warnings.append(
+            "Game in progress — edges use the in-game model (score + clock only); "
+            "verdicts capped at LEAN."
+        )
 
     # Injury schemas
     home_injury_schemas = [
@@ -1285,16 +1349,6 @@ async def _process_single_game(
             live_state.away_players = away_players
         except Exception as e:
             logger.warning(f"Boxscore fetch failed for {nba_game_id}: {e}")
-
-    # Live-adjusted prediction
-    live_pred = _calculate_live_prediction(
-        pre_game_prediction=prediction,
-        game_status=game_raw.get("game_status", 1),
-        home_score=game_raw.get("home_score", 0),
-        away_score=game_raw.get("away_score", 0),
-        period=game_raw.get("period", 0),
-        game_clock=game_raw.get("game_clock", ""),
-    )
 
     return GameAnalysis(
         game_id=game_id, tipoff=tipoff, tipoff_sgt=tipoff_sgt, venue=venue,
