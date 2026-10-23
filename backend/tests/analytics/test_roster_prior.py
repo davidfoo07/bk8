@@ -8,11 +8,13 @@ import pytest
 
 from app.analytics.edge_calculator import calculate_edge, cap_verdict
 from app.analytics.roster_prior import (
+    PRIOR_REGRESSION,
     REPLACEMENT_OFFSET,
     compute_roster_priors,
     compute_roster_turnover,
     is_stale_prior,
     league_average_rating,
+    regress_team_ratings,
 )
 from app.services.pipeline import NBA_TEAM_ID_TO_ABBR
 
@@ -67,8 +69,9 @@ class TestRosterPriors:
         order_last = sorted(team_ratings, key=lambda a: team_ratings[a]["nrtg"])
         assert order_prior == order_last
         for abbr in TEAMS:
-            # Same sign and magnitude (within the spread calibration).
-            assert priors[abbr]["nrtg"] == pytest.approx(team_ratings[abbr]["nrtg"], abs=2.0)
+            # Same sign, regressed toward the mean by PRIOR_REGRESSION.
+            expected = PRIOR_REGRESSION * team_ratings[abbr]["nrtg"]
+            assert priors[abbr]["nrtg"] == pytest.approx(expected, abs=1.0)
             assert priors[abbr]["pace"] == 99.0
 
     def test_phi_adding_stars_raises_prior_nrtg(self) -> None:
@@ -84,8 +87,9 @@ class TestRosterPriors:
         rosters["PHI"] = rosters["PHI"][:6] + list(stars)
 
         after = compute_roster_priors(rosters, metrics, team_ratings)
-        assert after["PHI"]["nrtg"] > baseline["PHI"]["nrtg"] + 1.0
-        assert after["PHI"]["nrtg"] > team_ratings["PHI"]["nrtg"] + 1.0
+        # (+1.4 before regression to the mean; ×PRIOR_REGRESSION ≈ +0.8)
+        assert after["PHI"]["nrtg"] > baseline["PHI"]["nrtg"] + 0.5
+        assert after["PHI"]["nrtg"] > team_ratings["PHI"]["nrtg"] + 0.5
         # League average still anchored.
         assert sum(p["nrtg"] for p in after.values()) / 30 == pytest.approx(0.0, abs=0.02)
 
@@ -194,3 +198,42 @@ class TestCapVerdict:
     def test_settled_passes_through(self) -> None:
         edge = calculate_edge(0.80, 0.50).model_copy(update={"verdict": "SETTLED"})
         assert cap_verdict(edge, "LEAN").verdict == "SETTLED"
+
+
+class TestPriorRegressionAndOlderSeason:
+    def test_star_who_missed_last_season_uses_season_before(self) -> None:
+        """Haliburton/Lillard: no last-season row → was replacement level at 10 MPG."""
+        rosters, metrics, team_ratings = _league(spread=0.0)
+        older = {777: _player(777, 8.0, mpg=34.0, gp=73)}
+        rosters["IND"] = rosters["IND"][:9] + [777]
+        without = compute_roster_priors(rosters, metrics, team_ratings)
+        with_older = compute_roster_priors(
+            rosters, metrics, team_ratings,
+            older_player_metrics=older, older_team_ratings=team_ratings,
+        )
+        assert without["IND"]["coverage"] < 1.0
+        assert with_older["IND"]["coverage"] == 1.0
+        assert with_older["IND"]["nrtg"] > without["IND"]["nrtg"] + 0.5
+        assert with_older["IND"]["nrtg"] > 0
+
+    def test_older_season_recentred_on_its_league_average(self) -> None:
+        rosters, metrics, team_ratings = _league(spread=0.0)
+        rosters["IND"] = rosters["IND"][:9] + [777]
+        # Same player relative to his league, but that league scored 3 pts less.
+        older = {777: {**_player(777, 0.0, mpg=34.0), "E_OFF_RATING": LEAGUE_AVG - 3,
+                       "E_DEF_RATING": LEAGUE_AVG - 3}}
+        older_teams = {a: {**r, "ortg": r["ortg"] - 3, "drtg": r["drtg"] - 3}
+                       for a, r in team_ratings.items()}
+        priors = compute_roster_priors(
+            rosters, metrics, team_ratings,
+            older_player_metrics=older, older_team_ratings=older_teams,
+        )
+        assert priors["IND"]["nrtg"] == pytest.approx(0.0, abs=0.05)
+
+    def test_regress_team_ratings_shrinks_toward_mean(self) -> None:
+        _, _, team_ratings = _league(spread=1.0)
+        regressed = regress_team_ratings(team_ratings, factor=0.6)
+        for abbr, r in team_ratings.items():
+            assert regressed[abbr]["nrtg"] == pytest.approx(0.6 * r["nrtg"], abs=0.02)
+            assert regressed[abbr]["pace"] == r["pace"]
+        assert regress_team_ratings({}) == {}

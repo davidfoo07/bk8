@@ -18,11 +18,12 @@ from zoneinfo import ZoneInfo
 from typing import Any
 
 import re
+import unicodedata
 
 from loguru import logger
 from scipy.stats import norm
 
-from app.analytics.edge_calculator import calculate_edge, cap_verdict
+from app.analytics.edge_calculator import calculate_edge, cap_verdict, guard_market_disagreement
 from app.analytics.lineup_adjustment import OnOffSplitModel, compute_player_impact
 from app.analytics.prediction_model import (
     GAME_STD_DEV,
@@ -34,9 +35,11 @@ from app.analytics.prediction_model import (
 )
 from app.analytics.schedule_engine import calculate_schedule_context, determine_motivation
 from app.analytics.roster_prior import (
+    PLAYER_SHRINK_GP,
     compute_roster_priors,
     compute_roster_turnover,
     is_stale_prior,
+    regress_team_ratings,
 )
 from app.analytics.season_blend import blend_player_metrics, blend_team_ratings
 from app.config import current_season, previous_season, settings
@@ -200,6 +203,12 @@ async def run_daily_pipeline(
     ratings_data, injuries_data, polymarket_events, player_metrics = await asyncio.gather(
         ratings_task, injuries_task, polymarket_task, player_metrics_task
     )
+
+    # Rosters (set by _fetch_team_ratings) are fresher than ESPN's injury teams
+    # and tell us which team each player's stats were earned on.
+    team_context = _cache.get("player_team_context", ttl_seconds=6 * 3600) or {}
+    player_metrics = _with_team_context(player_metrics, team_context)
+    injuries_data = _reassign_injury_teams(injuries_data, player_metrics, team_context)
 
     # Cache raw data for instant override recalculation
     _raw_data_cache[raw_cache_key] = {
@@ -518,13 +527,20 @@ async def _fetch_team_ratings(
     nba_api.stale_endpoints.clear()
     season = current_season()
     prior_season = previous_season(season)
+    older_season = previous_season(prior_season)
 
-    current, prior, current_rosters, prior_rosters, prior_players = await asyncio.gather(
+    (
+        current, prior, current_rosters, prior_rosters, prior_players,
+        older, older_players,
+    ) = await asyncio.gather(
         _fetch_season_team_ratings(season, warnings),
         _fetch_season_team_ratings(prior_season, warnings, ttl_seconds=86400),
         _fetch_rosters(season, warnings),
         _fetch_rosters(prior_season, warnings, ttl_seconds=86400),
         _fetch_season_player_metrics(prior_season, warnings, ttl_seconds=86400),
+        # Season before last: covers players who missed most of last season.
+        _fetch_season_team_ratings(older_season, warnings, ttl_seconds=86400),
+        _fetch_season_player_metrics(older_season, warnings, ttl_seconds=86400),
     )
 
     current_rosters = await _fill_rosters_from_espn(
@@ -544,9 +560,15 @@ async def _fetch_team_ratings(
         # Prior = this season's roster rated on last season's player impact,
         # falling back to last season's team rating per team.
         prior_players_by_id = _metrics_by_player_id(prior_players)
-        roster_priors = compute_roster_priors(current_rosters, prior_players_by_id, prior)
+        roster_priors = compute_roster_priors(
+            current_rosters, prior_players_by_id, prior,
+            older_player_metrics=_metrics_by_player_id(older_players),
+            older_team_ratings=older,
+        )
         turnover = compute_roster_turnover(current_rosters, prior_rosters, prior_players_by_id)
-        blend_prior = {**prior, **roster_priors}
+        # Teams without a roster prior fall back to last season's rating,
+        # regressed toward the mean like the roster prior.
+        blend_prior = {**regress_team_ratings(prior), **roster_priors}
         if not roster_priors:
             warnings.append(
                 "Roster-based prior unavailable — early-season ratings lean on "
@@ -595,6 +617,12 @@ async def _fetch_team_ratings(
                 f"({', '.join(sorted(nba_api.stale_endpoints))})."
             )
         _cache.set("team_ratings", result)
+        _cache.set("player_team_context", {
+            "team": {pid: abbr for abbr, ids in current_rosters.items() for pid in ids},
+            "prior_team": {pid: abbr for abbr, ids in prior_rosters.items() for pid in ids},
+            "current_nrtg": {abbr: float(r["nrtg"]) for abbr, r in current.items()},
+            "prior_nrtg": {abbr: float(r["nrtg"]) for abbr, r in prior.items()},
+        })
 
     # Fallback: estimate from standings
     if not result and standings_fallback:
@@ -1414,6 +1442,35 @@ async def _process_single_game(
         )
         logger.warning(f"  {away_abbr}@{home_abbr}: {game_warnings[-1]}")
 
+    corrected = [
+        f"{inj.get('player_name')} ({inj['team_corrected_from']}→{abbr})"
+        for abbr, injuries in ((home_abbr, home_injuries_raw), (away_abbr, away_injuries_raw))
+        for inj in injuries if inj.get("team_corrected_from")
+    ]
+    if corrected:
+        game_warnings.append(
+            f"Injury report lists {', '.join(corrected)} under his old team; "
+            "using the current roster."
+        )
+
+    # Market sanity guard (pre-game): a 15+ point disagreement with Polymarket
+    # is far likelier a bad input (roster, injury mapping) than a real edge.
+    if not is_live:
+        disagreements: list[str] = []
+        for key, mkt in list(markets.items()):
+            markets[key], gap = guard_market_disagreement(
+                mkt, settings.market_disagreement_threshold,
+                settings.market_blend_model_weight,
+            )
+            if gap is not None:
+                disagreements.append(f"{key} {gap * 100:.0f} pts")
+        if disagreements:
+            game_warnings.append(
+                f"Model disagrees with market by {', '.join(disagreements)} — check inputs "
+                "(rosters, injuries); verdict capped at LEAN."
+            )
+            logger.warning(f"  {away_abbr}@{home_abbr}: {game_warnings[-1]}")
+
     # A score + clock model has no real edge over Polymarket's in-game prices:
     # show the numbers, never a BUY.
     if is_live:
@@ -1714,6 +1771,93 @@ def _is_live_price(price: float) -> bool:
 
 # ─── Helper Functions ───────────────────────────────────────────────
 
+def _normalize_name(name: str) -> str:
+    """Accent/punctuation-insensitive player name ("Jusuf Nurkić" → "jusuf nurkic")."""
+    plain = "".join(c for c in unicodedata.normalize("NFKD", name) if not unicodedata.combining(c))
+    return " ".join(re.sub(r"[^a-z ]", "", plain.lower()).split())
+
+
+def _lookup_player(
+    player_metrics: dict[str, dict[str, Any]], name: str,
+) -> dict[str, Any] | None:
+    """Metrics row for an injury-report name.  ESPN drops diacritics that
+    stats.nba.com keeps (Nurkić, Porziņģis), so fall back to a normalized match."""
+    row = player_metrics.get(name)
+    if row is not None:
+        return row
+    key = _normalize_name(name)
+    return next((r for n, r in player_metrics.items() if _normalize_name(n) == key), None)
+
+
+def _with_team_context(
+    player_metrics: dict[str, dict[str, Any]],
+    context: dict[str, dict[Any, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Add TEAM_CONTEXT_NRTG: the NRtg of the team(s) each player's numbers were
+    earned on, weighted like the player blend (CURRENT_WEIGHT).
+
+    E_NET_RATING is an on-court team rating, so a player's own contribution is
+    E_NET minus the team he played for.  Using his NEW team instead turns every
+    offseason move into a phantom effect: Devin Carter (−7.6 on SAC's −9.8)
+    "losing him helps BOS by +2.9".
+    """
+    if not context:
+        return player_metrics
+    team, prior_team = context.get("team", {}), context.get("prior_team", {})
+    current_nrtg, prior_nrtg = context.get("current_nrtg", {}), context.get("prior_nrtg", {})
+
+    result: dict[str, dict[str, Any]] = {}
+    for name, row in player_metrics.items():
+        pid = row.get("PLAYER_ID")
+        pid = int(pid) if pid else None
+        cur = current_nrtg.get(team.get(pid))
+        old = prior_nrtg.get(prior_team.get(pid))
+        w = float(row.get("CURRENT_WEIGHT", 1.0 if old is None else 0.0))
+        if cur is None and old is None:
+            result[name] = row
+            continue
+        if cur is None:
+            ctx = old
+        elif old is None:
+            ctx = cur
+        else:
+            ctx = w * cur + (1 - w) * old
+        result[name] = {**row, "TEAM_CONTEXT_NRTG": ctx}
+    return result
+
+
+def _reassign_injury_teams(
+    injuries_data: dict[str, list[dict[str, Any]]],
+    player_metrics: dict[str, dict[str, Any]],
+    context: dict[str, dict[Any, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Move injuries ESPN files under a player's old team to his current roster team.
+
+    ESPN's injury feed lags trades (Brandon Ingram listed OUT for TOR after
+    both TOR's and LAC's rosters had him on LAC), which both robs the real team
+    of the absence and docks the wrong one.  Moved entries carry
+    ``team_corrected_from`` so the game can say so.
+    """
+    team = context.get("team") if context else None
+    if not team:
+        return injuries_data
+
+    result: dict[str, list[dict[str, Any]]] = {}
+    moved: list[str] = []
+    for abbr, injuries in injuries_data.items():
+        for inj in injuries:
+            row = _lookup_player(player_metrics, inj.get("player_name", ""))
+            pid = row.get("PLAYER_ID") if row else None
+            roster_team = team.get(int(pid)) if pid else None
+            if roster_team and roster_team != abbr:
+                moved.append(f"{inj.get('player_name')} {abbr}→{roster_team}")
+                inj = {**inj, "team": roster_team, "team_corrected_from": abbr}
+            result.setdefault(inj.get("team") or abbr, []).append(inj)
+    if moved:
+        logger.info(f"Injury teams corrected from rosters: {', '.join(moved)}")
+    return result
+
+
 def _build_player_absences(
     injuries_raw: list[dict[str, Any]],
     player_metrics: dict[str, dict[str, Any]] | None = None,
@@ -1738,6 +1882,10 @@ def _build_player_absences(
     model think the remaining bench players are championship-caliber.
 
     Other notes:
+      - The baseline is the team the player's numbers came from
+        (TEAM_CONTEXT_NRTG, see _with_team_context), falling back to team_nrtg
+      - Relative impact is shrunk toward 0 by games played (Beal: 6 GP at −9.3
+        is noise, not a reason his absence makes LAC 3 pts better)
       - Players under 10 min/game are filtered (too noisy from small samples)
       - ORtg/DRtg impacts derived symmetrically from NRtg
       - Results sorted by |impact| descending so diminishing returns is fair
@@ -1774,7 +1922,7 @@ def _build_player_absences(
             continue  # PROBABLE or overridden OFF
 
         # Look up real stats
-        stats = pm.get(player_name)
+        stats = _lookup_player(pm, player_name)
 
         if stats:
             minutes = float(stats.get("MIN", 0) or 0)
@@ -1800,7 +1948,15 @@ def _build_player_absences(
             # On good teams this barely matters (OKC NRtg=+10, SGA E_NET=+16
             # → relative = +6, same direction).  But on bad teams it's the
             # difference between 93% and 50%.
-            e_net = e_net_raw - team_nrtg
+            baseline = stats.get("TEAM_CONTEXT_NRTG")
+            baseline = team_nrtg if baseline is None else float(baseline)
+            e_net = e_net_raw - baseline
+            if "CURRENT_GP" in stats or "PRIOR_GP" in stats:
+                gp = float(stats.get("CURRENT_GP", 0) or 0) + float(stats.get("PRIOR_GP", 0) or 0)
+            else:
+                gp = float(stats.get("GP", 0) or 0)
+            if gp > 0 or "GP" in stats:
+                e_net *= gp / (gp + PLAYER_SHRINK_GP)
 
             min_share = minutes / 48.0
             dampening = 0.6
@@ -1814,7 +1970,7 @@ def _build_player_absences(
 
             logger.debug(
                 f"  Injury impact: {player_name} ({status}, {miss_prob:.0%} miss) -- "
-                f"E_NET_raw={e_net_raw:+.1f}, team_nrtg={team_nrtg:+.1f}, "
+                f"E_NET_raw={e_net_raw:+.1f}, baseline={baseline:+.1f}, gp={gp:.0f}, "
                 f"E_NET_rel={e_net:+.1f}, MIN={minutes:.1f}, "
                 f"NRtg impact={nrtg_impact:+.2f}"
             )

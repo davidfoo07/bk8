@@ -43,3 +43,6 @@ class MarketEdge(BaseModel):
     away_label: str | None = None  # e.g. "Grizzlies" instead of "NO"
     model_probability: float
     edge: EdgeResult
+    # w·model + (1−w)·market; set when the model is sanity-checked against the
+    # market (see edge_calculator.guard_market_disagreement).
+    blended_probability: float | None = None

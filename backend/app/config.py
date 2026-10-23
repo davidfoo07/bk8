@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     # Motivation flags (FIGHTING/DESPERATE/...) are forced NEUTRAL until
     # a team has played this many games — early standings mean nothing.
     early_season_games: int = 20
+    # Sanity guard: Polymarket NBA prices are well calibrated, so a model that
+    # disagrees by more than this (probability points) is far more likely wrong
+    # than right — verdict capped at LEAN and a data-quality warning added.
+    market_disagreement_threshold: float = 0.15
+    # Weight on the model in the market-blended probability used for Kelly
+    # sizing when the guard trips (1.0 = raw model, 0.0 = market).
+    market_blend_model_weight: float = 0.5
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

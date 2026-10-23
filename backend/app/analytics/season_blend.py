@@ -98,6 +98,9 @@ def blend_player_metrics(
     Injured players often have 0 current-season games, so the prior season is
     what keeps their absence impact meaningful early in the year.  Rookies
     (no prior row) use current-season numbers as-is.
+
+    Each row also carries CURRENT_GP / PRIOR_GP and CURRENT_WEIGHT (the share
+    of the blended numbers that comes from the current season).
     """
     blended_keys = ("MIN", "E_OFF_RATING", "E_DEF_RATING", "E_NET_RATING")
     result: dict[str, dict[str, Any]] = {}
@@ -105,12 +108,17 @@ def blend_player_metrics(
     for name in set(current) | set(prior):
         cur = current.get(name)
         old = prior.get(name)
+        cur_gp = float((cur or {}).get("GP", 0) or 0)
+        old_gp = float((old or {}).get("GP", 0) or 0)
         if not cur or not old:
-            result[name] = dict(cur or old)  # type: ignore[arg-type]
+            result[name] = {
+                **(cur or old),  # type: ignore[dict-item]
+                "CURRENT_GP": cur_gp, "PRIOR_GP": old_gp, "CURRENT_WEIGHT": 1.0 if cur else 0.0,
+            }
             continue
 
-        w = blend_weight(float(cur.get("GP", 0) or 0), k)
-        row = dict(cur)
+        w = blend_weight(cur_gp, k)
+        row = {**cur, "CURRENT_GP": cur_gp, "PRIOR_GP": old_gp, "CURRENT_WEIGHT": w}
         for key in blended_keys:
             c, p = cur.get(key), old.get(key)
             if c is None or p is None:

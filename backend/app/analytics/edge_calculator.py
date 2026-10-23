@@ -9,7 +9,7 @@ import math
 
 from loguru import logger
 
-from app.schemas.market import EdgeResult
+from app.schemas.market import EdgeResult, MarketEdge
 
 
 def calculate_edge(
@@ -126,6 +126,38 @@ def cap_verdict(edge: EdgeResult, max_verdict: str = "LEAN") -> EdgeResult:
     if VERDICT_ORDER.index(edge.verdict) <= VERDICT_ORDER.index(max_verdict):
         return edge
     return edge.model_copy(update={"verdict": max_verdict})
+
+
+def guard_market_disagreement(
+    market: MarketEdge,
+    threshold: float,
+    model_weight: float,
+) -> tuple[MarketEdge, float | None]:
+    """Sanity-check one market's model probability against its price.
+
+    Always reports the blended probability ``w·model + (1−w)·market``.  When
+    |model − market| exceeds ``threshold`` the verdict is capped at LEAN and the
+    Kelly size is recomputed from the blended probability (the raw model
+    probability and edge stay visible).  Returns (market, gap) — gap is None
+    unless the guard tripped.  Settled / unpriced markets pass through.
+    """
+    price = market.polymarket_home_yes
+    if price is None or market.edge.verdict not in VERDICT_ORDER:
+        return market, None
+
+    model_p = market.model_probability
+    blended = model_weight * model_p + (1 - model_weight) * price
+    gap = round(abs(model_p - price), 4)  # rounded: 0.65 − 0.50 is not exactly 0.15
+    update: dict[str, object] = {"blended_probability": round(blended, 4)}
+    if gap <= threshold:
+        return market.model_copy(update=update), None
+
+    sized = calculate_edge(blended, price)
+    update["edge"] = cap_verdict(market.edge, "LEAN").model_copy(update={
+        "kelly_fraction": sized.kelly_fraction,
+        "suggested_bet_pct": sized.suggested_bet_pct,
+    })
+    return market.model_copy(update=update), gap
 
 
 def calculate_game_edges(

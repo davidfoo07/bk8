@@ -145,10 +145,11 @@ class TestFetchTeamRatingsRosterPrior:
         phi = ratings["PHI"]
         assert phi["prior_source"] == "roster"
         assert phi["last_season_nrtg"] == 0.3
-        # Clearly above last season's +0.3 and every unchanged team.
-        assert phi["prior_nrtg"] > phi["last_season_nrtg"] + 0.75
+        # Clearly above last season's +0.3 and every unchanged team (margins
+        # are after regression to the mean, PRIOR_REGRESSION).
+        assert phi["prior_nrtg"] > phi["last_season_nrtg"] + 0.3
         others = max(r["prior_nrtg"] for abbr, r in ratings.items() if abbr != "PHI")
-        assert phi["prior_nrtg"] > others + 1.0
+        assert phi["prior_nrtg"] > others + 0.6
         assert phi["nrtg"] == pytest.approx(phi["prior_nrtg"], abs=0.01)  # 0 GP → all prior
         # 40% of old minutes left; 4 × 33 of 240 rotation minutes are new.
         assert phi["roster_turnover"] == pytest.approx((0.4 + 132 / 240) / 2, abs=0.01)
@@ -201,6 +202,8 @@ class TestStalePriorCapsVerdicts:
         assert pipeline._extract_top_edges([analysis]) == []
 
     async def test_fresh_prior_keeps_strong_buy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Market guard off: this test is about the stale-prior cap only.
+        monkeypatch.setattr(pipeline.settings, "market_disagreement_threshold", 1.0)
         analysis = await self._analyse(monkeypatch, stale=False)
         assert analysis.model.confidence == "MEDIUM"
         assert analysis.markets["moneyline"].edge.verdict == "STRONG BUY"
