@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import math
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import re
@@ -54,6 +55,10 @@ from app.services.market_store import save_market_snapshots
 
 
 # ─── NBA Team ID ↔ Abbreviation maps ───────────────────────────────
+_SGT = ZoneInfo("Asia/Singapore")
+_ET = ZoneInfo("America/New_York")
+_SLATE_ROLLOVER_HOUR_ET = 6
+
 NBA_TEAM_ID_TO_ABBR: dict[int, str] = {
     1610612737: "ATL", 1610612738: "BOS", 1610612751: "BKN", 1610612766: "CHA",
     1610612741: "CHI", 1610612739: "CLE", 1610612742: "DAL", 1610612743: "DEN",
@@ -122,16 +127,15 @@ _raw_data_cache: dict[str, Any] = {}
 
 
 
-def _get_nba_game_date() -> date:
-    """Get today's date in US Eastern time.
-    
-    NBA schedules games by Eastern Time date. A game listed as April 9
-    might tip off at 7am SGT on April 10. Using ET date ensures we always
-    query the right day from the NBA API regardless of server timezone.
+def _get_nba_game_date(now: datetime | None = None) -> date:
+    """The NBA slate date (US Eastern) to show right now.
+
+    NBA schedules games by Eastern date; a game listed as April 9 tips off at
+    7am SGT on April 10.  The slate rolls over at 6am ET, not midnight, so late
+    West Coast games that run past midnight ET stay on the dashboard until done.
     """
-    et = timezone(timedelta(hours=-4))  # EDT (Apr-Nov)
-    now_et = datetime.now(et)
-    return now_et.date()
+    now_et = (now or datetime.now(timezone.utc)).astimezone(_ET)
+    return (now_et - timedelta(hours=_SLATE_ROLLOVER_HOUR_ET)).date()
 
 
 # ─── Main Pipeline ──────────────────────────────────────────────────
@@ -1431,8 +1435,9 @@ async def _process_single_game(
         for inj in away_injuries_raw
     ]
 
-    # Tipoff SGT
-    tipoff_sgt = tipoff + timedelta(hours=8) if tipoff else None
+    # Tipoff SGT — same instant, shown in Singapore time (shifting the clock by
+    # +8h while keeping a UTC offset made the UI add the 8 hours twice).
+    tipoff_sgt = tipoff.astimezone(_SGT) if tipoff and tipoff.tzinfo else tipoff
 
     # Data quality
     data_quality = DataQuality(

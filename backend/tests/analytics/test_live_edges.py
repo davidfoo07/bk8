@@ -53,3 +53,22 @@ class TestLiveMarketProbs:
         _, cover, over = _live_market_probs(PRE_GAME, live, 9, 15, None, None)
         assert cover == PRE_GAME.spread_cover_prob
         assert over == PRE_GAME.over_prob
+
+
+class TestSlateDate:
+    @pytest.mark.parametrize(
+        "now_utc, expected",
+        [
+            ("2026-10-23T04:03:00+00:00", "2026-10-22"),  # 12:03am ET: late games still on
+            ("2026-10-23T09:59:00+00:00", "2026-10-22"),  # 5:59am EDT
+            ("2026-10-23T10:00:00+00:00", "2026-10-23"),  # 6:00am EDT: new slate
+            ("2026-11-10T10:30:00+00:00", "2026-11-09"),  # 5:30am EST (after DST ends)
+            ("2026-11-10T11:00:00+00:00", "2026-11-10"),  # 6:00am EST
+        ],
+    )
+    def test_rollover_at_6am_eastern(self, now_utc, expected):
+        from datetime import datetime
+
+        from app.services.pipeline import _get_nba_game_date
+
+        assert _get_nba_game_date(datetime.fromisoformat(now_utc)).isoformat() == expected
