@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from loguru import logger
 from pydantic import BaseModel
 
+from app.services.evaluation import ModelEvaluation, build_evaluation
 from app.services.pipeline import fetch_scores
 from app.services.prediction_store import list_saved_dates, load_predictions
 
@@ -53,6 +54,12 @@ class DailyResults(BaseModel):
     avg_total_error: float | None = None
     avg_spread_error: float | None = None
     total_bias: float | None = None
+
+
+@router.get("/evaluation", response_model=ModelEvaluation)
+async def get_model_evaluation() -> ModelEvaluation:
+    """Model vs Polymarket calibration and BUY-verdict ROI across all graded History."""
+    return await build_evaluation()
 
 
 @router.get("/{game_date}", response_model=DailyResults)

@@ -67,6 +67,41 @@ export interface DailySimulation {
   bets: SimBet[];
 }
 
+export interface MarketCalibration {
+  market_type: string;
+  n: number;
+  model_brier: number | null;
+  market_brier: number | null;
+  model_log_loss: number | null;
+  market_log_loss: number | null;
+  /** model − market; negative means the model forecast better */
+  brier_diff: number | null;
+  brier_diff_se: number | null;
+  avg_abs_disagreement: number | null;
+  conclusion: "too_few" | "model_better" | "market_better" | "no_difference";
+}
+
+export interface BetRecord {
+  market_type: string;
+  n: number;
+  wins: number;
+  hit_rate: number | null;
+  avg_price: number | null;
+  pnl: number;
+  roi: number | null;
+  roi_se: number | null;
+}
+
+export interface ModelEvaluation {
+  dates: string[];
+  graded_games: number;
+  min_games: number;
+  conclusive: boolean;
+  calibration: MarketCalibration[];
+  bets: BetRecord[];
+  clv: { supported: boolean; reason: string; needed: string };
+}
+
 export const api = {
   /** Get full analysis for today's games */
   getTodaysGames: () => fetchJSON<DailyAnalysis>("/games/today"),
@@ -115,6 +150,9 @@ export const api = {
       "/bets/resolve",
       { method: "POST" },
     ),
+
+  /** Model vs Polymarket calibration + BUY-verdict ROI over all graded History */
+  getModelEvaluation: () => fetchJSON<ModelEvaluation>("/results/evaluation"),
 
   /** List all dates available for simulation */
   getSimulationDates: () => fetchJSON<SavedDateEntry[]>("/simulation/"),
