@@ -85,7 +85,7 @@ async def get_prediction_history() -> list[dict]:
     
     Returns [{date, games_count, saved_at, file_size_kb}] sorted by date desc.
     """
-    return list_saved_dates()
+    return await list_saved_dates()
 
 
 @router.get("/history/{game_date}", response_model=DailyAnalysis)
@@ -99,7 +99,7 @@ async def get_predictions_for_date(game_date: str) -> DailyAnalysis:
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid date format: {game_date}. Use YYYY-MM-DD.")
     
-    analysis = load_predictions(parsed_date)
+    analysis = await load_predictions(parsed_date)
     if analysis is None:
         raise HTTPException(status_code=404, detail=f"No saved predictions for {game_date}")
     
@@ -140,7 +140,7 @@ async def get_upcoming_games() -> DailyAnalysis:
     # but different local date)
     for days_back in range(1, 3):
         past_date = et_date - timedelta(days=days_back)
-        saved = load_predictions(past_date)
+        saved = await load_predictions(past_date)
         if saved:
             for game in saved.games:
                 if game.game_id not in upcoming:

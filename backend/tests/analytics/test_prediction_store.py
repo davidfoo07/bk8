@@ -3,8 +3,8 @@
 import json
 from datetime import UTC, date, datetime, timedelta
 
-import pytest
-
+from app.models.database import async_session_factory
+from app.models.tables import DailyPrediction
 from app.services import prediction_store
 from app.services.prediction_store import _has_started, _lock_started_games
 
@@ -72,32 +72,71 @@ class TestLockStartedGames:
         assert out["top_edges"] == [_edge("upcoming", 0.1)]
 
 
+async def _saved(game_date: date = date(2026, 10, 22)) -> dict | None:
+    async with async_session_factory() as session:
+        row = await session.get(DailyPrediction, game_date)
+        return row.data if row else None
+
+
+async def _store(data: dict, game_date: date = date(2026, 10, 22)) -> None:
+    async with async_session_factory() as session, session.begin():
+        session.add(DailyPrediction(game_date=game_date, data=data, games_count=len(data["games"])))
+
+
+class _Analysis:
+    """Stand-in for DailyAnalysis: save_predictions only needs date + JSON."""
+
+    def __init__(self, games: list[dict]):
+        self.date = date(2026, 10, 22)
+        self._data = {"date": "2026-10-22", "games": games, "top_edges": []}
+
+    def model_dump_json(self) -> str:
+        return json.dumps(self._data)
+
+
 class TestSavePredictions:
-    @pytest.fixture(autouse=True)
-    def _tmp_dir(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(prediction_store, "PREDICTIONS_DIR", tmp_path)
-        self.dir = tmp_path
+    async def test_first_save_creates_row(self):
+        future = datetime.now(UTC) + timedelta(hours=3)
+        assert await prediction_store.save_predictions(_Analysis([_game("g", future, prob=0.6)]))
+        saved = await _saved()
+        assert saved["games"][0]["model"]["home_win_prob"] == 0.6
+        assert saved["games_count"] == 1
 
-    class _Analysis:
-        def __init__(self, games: list[dict]):
-            self.date = date(2026, 10, 22)
-            self._data = {"date": "2026-10-22", "games": games, "top_edges": []}
+    async def test_rerun_before_tipoff_updates(self):
+        future = datetime.now(UTC) + timedelta(hours=3)
+        await prediction_store.save_predictions(_Analysis([_game("g", future, prob=0.6)]))
+        await prediction_store.save_predictions(_Analysis([_game("g", future, prob=0.7)]))
+        assert (await _saved())["games"][0]["model"]["home_win_prob"] == 0.7
 
-        def model_dump_json(self) -> str:
-            return json.dumps(self._data)
-
-    def test_rerun_after_tipoff_does_not_change_saved_prediction(self):
-        # Pre-game save already on disk for a game that has since tipped off.
+    async def test_rerun_after_tipoff_does_not_change_saved_prediction(self):
         past = datetime.now(UTC) - timedelta(hours=1)
         pre_game = {"date": "2026-10-22", "games": [_game("g", past, prob=0.40)], "top_edges": []}
-        (self.dir / "2026-10-22.json").write_text(json.dumps(pre_game))
+        await _store(pre_game)
 
-        prediction_store.save_predictions(self._Analysis([_game("g", past, status=3, prob=0.90)]))
+        await prediction_store.save_predictions(_Analysis([_game("g", past, status=3, prob=0.90)]))
 
-        saved = json.loads((self.dir / "2026-10-22.json").read_text())
-        assert saved["games"][0]["model"]["home_win_prob"] == 0.40
+        assert (await _saved())["games"][0]["model"]["home_win_prob"] == 0.40
 
-    def test_nothing_written_when_every_game_already_started(self):
+    async def test_nothing_written_when_every_game_already_started(self):
         past = datetime.now(UTC) - timedelta(hours=1)
-        assert prediction_store.save_predictions(self._Analysis([_game("g", past)])) is None
-        assert not (self.dir / "2026-10-22.json").exists()
+        assert await prediction_store.save_predictions(_Analysis([_game("g", past)])) is False
+        assert await _saved() is None
+
+
+class TestLoadAndImport:
+    async def test_import_json_files_then_load_and_list(self, tmp_path):
+        day = {"date": "2026-10-21", "games_count": 0, "games": [], "top_edges": [],
+               "saved_at": "2026-10-22T11:58:29.843877"}
+        (tmp_path / "2026-10-21.json").write_text(json.dumps(day))
+        (tmp_path / "notes.json").write_text("{}")  # not a date → skipped
+
+        assert await prediction_store.import_json_files(tmp_path) == ["2026-10-21"]
+        assert await prediction_store.import_json_files(tmp_path) == []  # idempotent
+
+        loaded = await prediction_store.load_predictions(date(2026, 10, 21))
+        assert loaded is not None and loaded.games == []
+        listed = await prediction_store.list_saved_dates()
+        assert [d["date"] for d in listed] == ["2026-10-21"]
+
+    async def test_load_missing_date(self):
+        assert await prediction_store.load_predictions(date(2020, 1, 1)) is None

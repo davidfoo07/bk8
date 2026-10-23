@@ -254,9 +254,9 @@ async def run_daily_pipeline(
         f"{len(top_edges)} edges, {len(warnings)} warnings ==="
     )
 
-    # Persist predictions to disk
+    # Persist predictions (History) to the database
     try:
-        save_predictions(result)
+        await save_predictions(result)
     except Exception as e:
         logger.warning(f"Failed to save predictions: {e}")
 

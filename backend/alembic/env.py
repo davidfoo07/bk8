@@ -2,12 +2,14 @@
 
 from logging.config import fileConfig
 
+from sqlalchemy import create_engine, pool
+
 from alembic import context
-from sqlalchemy import engine_from_config, pool
 
 # Import the Base and all models so metadata is populated
-from app.models.database import Base
+from app.config import sync_database_url
 from app.models import tables  # noqa: F401 — imports trigger model registration
+from app.models.database import Base
 
 config = context.config
 if config.config_file_name is not None:
@@ -15,10 +17,13 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
+# An explicit sqlalchemy.url (e.g. set by the test suite) wins; otherwise use
+# the app's DATABASE_URL so migrations always hit the database the app uses.
+url = config.get_main_option("sqlalchemy.url") or sync_database_url()
+
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""
-    url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -31,11 +36,7 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    connectable = create_engine(url, poolclass=pool.NullPool)
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():

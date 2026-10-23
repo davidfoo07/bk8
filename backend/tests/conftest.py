@@ -1,8 +1,10 @@
 """Pytest configuration and shared fixtures.
 
-Tests run against a separate ``<dev db>_test`` database (override with
-TEST_DATABASE_URL), never the dev database from .env. The URL is swapped on
-the settings singleton here, before any test module imports app.models.database
+Tests always run against a throwaway local database — TEST_DATABASE_URL, or
+``<dev db>_test`` next to a local dev database, or the local Docker Postgres
+when .env points at a hosted one (Supabase): the suite drops and recreates its
+database, which must never happen remotely.  The URL is swapped on the
+settings singleton here, before any test module imports app.models.database
 and builds the engine.
 """
 
@@ -13,18 +15,29 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
-from app.config import settings
+from app.config import settings, sync_database_url
 
-_dev_db = make_url(settings.database_url).database
-_test_url = make_url(
-    os.environ.get("TEST_DATABASE_URL")
-    or make_url(settings.database_url).set(database=f"{_dev_db}_test").render_as_string(hide_password=False)
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_LOCAL_TEST_URL = "postgresql+asyncpg://postgres:postgres@localhost:5433/courtedge_test"
+
+_dev_url = make_url(settings.database_url)
+if os.environ.get("TEST_DATABASE_URL"):
+    _test_url = make_url(os.environ["TEST_DATABASE_URL"])
+elif _dev_url.host in _LOCAL_HOSTS:
+    _test_url = _dev_url.set(database=f"{_dev_url.database}_test")
+else:
+    _test_url = make_url(_LOCAL_TEST_URL)
+if _test_url.host not in _LOCAL_HOSTS:
+    raise RuntimeError(f"Refusing to run tests against non-local database host {_test_url.host!r}")
+if (_test_url.host, _test_url.port, _test_url.database) == (
+    _dev_url.host, _dev_url.port, _dev_url.database
+):
+    raise RuntimeError(f"Test database must differ from dev database {_dev_url.database!r}")
+
+settings.database_url = _test_url.set(drivername="postgresql+asyncpg").render_as_string(
+    hide_password=False
 )
-if _test_url.database == _dev_db:
-    raise RuntimeError(f"Test database must differ from dev database {_dev_db!r}")
-
-settings.database_url = _test_url.set(drivername="postgresql+asyncpg").render_as_string(hide_password=False)
-settings.database_url_sync = _test_url.set(drivername="postgresql").render_as_string(hide_password=False)
+settings.database_url_sync = sync_database_url(settings.database_url)
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _db_ready = False
@@ -32,7 +45,7 @@ _db_ready = False
 
 def _psycopg2_url():
     # SQLAlchemy 2.1 maps bare postgresql:// to psycopg 3, which isn't installed.
-    return make_url(settings.database_url_sync).set(drivername="postgresql+psycopg2")
+    return make_url(sync_database_url(settings.database_url))
 
 
 @pytest.fixture(scope="session", autouse=True)

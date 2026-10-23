@@ -1,7 +1,7 @@
-"""Prediction persistence — save/load daily analyses as JSON files.
+"""Prediction persistence — History, one saved DailyAnalysis per NBA date.
 
-Simple file-based storage: one JSON per date under backend/data/predictions/.
-No DB dependency, no ORM, just Pydantic serialization.
+Stored in the ``daily_predictions`` table (date → full analysis as JSONB), so
+History lives in the database (local Postgres or Supabase), not on one machine.
 
 IMPORTANT: Pre-game predictions (with full Polymarket edges) are protected.
 Later pipeline runs (post-game, when Polymarket has delisted markets) will NOT
@@ -18,16 +18,14 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from loguru import logger
+from sqlalchemy import func, select
 
+from app.models.database import async_session_factory
+from app.models.tables import DailyPrediction
 from app.schemas.game import DailyAnalysis
 
-# Resolve to backend/data/predictions/ relative to this file
-PREDICTIONS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "predictions"
-
-
-def _ensure_dir() -> None:
-    """Create the predictions directory if it doesn't exist."""
-    PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
+# Where History used to live; read once by import_json_files().
+LEGACY_PREDICTIONS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "predictions"
 
 
 def _count_markets(data: dict) -> int:
@@ -94,63 +92,49 @@ def _lock_started_games(existing: dict | None, new: dict, now: datetime) -> dict
     return result
 
 
-def save_predictions(analysis: DailyAnalysis) -> Path | None:
-    """Save a DailyAnalysis to a dated JSON file.
+def combine_predictions(existing: dict | None, new: dict, now: datetime) -> dict | None:
+    """The day's snapshot to store after a pipeline run, or None to leave it as is.
 
     Per-game merge logic:
+      - Started games keep their saved pre-game version (see _lock_started_games).
       - For each game, keep whichever version (existing vs new) has MORE markets.
       - This handles: initial save has 2/6 games with markets, later run has 5/6.
         Result: all 6 games get the best available market data.
-      - Global fallback: if existing has strictly more total markets AND more games,
-        skip entirely (e.g. post-game run where Polymarket delisted everything).
     """
-    _ensure_dir()
-    filepath = PREDICTIONS_DIR / f"{analysis.date.isoformat()}.json"
-
-    existing_data: dict | None = None
-    if filepath.exists():
-        try:
-            existing_data = json.loads(filepath.read_text(encoding="utf-8"))
-        except Exception:
-            existing_data = None  # Corrupted file — overwrite it
-
-    new_data = _lock_started_games(
-        existing_data, json.loads(analysis.model_dump_json()), datetime.now(UTC)
-    )
+    new_data = _lock_started_games(existing, new, now)
     if not new_data["games"]:
-        logger.info(f"🔒 Nothing to save for {analysis.date}: every game already tipped off")
         return None
-    new_data["saved_at"] = datetime.now().isoformat()
-    new_market_count = _count_markets(new_data)
+    new_data["saved_at"] = now.isoformat()
 
-    if existing_data is not None:
-        try:
-            existing_market_count = _count_markets(existing_data)
+    if existing and _count_markets(existing) > 0:
+        merged = _merge_predictions(existing, new_data)
+        if _count_markets(merged) > _count_markets(new_data):
+            merged["saved_at"] = now.isoformat()
+            return merged
+    return new_data
 
-            # Per-game merge: for each game, pick the version with more markets
-            if existing_market_count > 0:
-                merged = _merge_predictions(existing_data, new_data)
-                merged_market_count = _count_markets(merged)
 
-                if merged_market_count > new_market_count:
-                    logger.info(
-                        f"🔀 Merged predictions for {analysis.date}: "
-                        f"existing had {existing_market_count} markets, "
-                        f"new has {new_market_count}, merged = {merged_market_count}"
-                    )
-                    merged["saved_at"] = datetime.now().isoformat()
-                    filepath.write_text(json.dumps(merged, indent=2), encoding="utf-8")
-                    return filepath
-
-        except Exception:
-            pass  # Corrupted file — overwrite it
-
-    filepath.write_text(json.dumps(new_data, indent=2), encoding="utf-8")
+async def save_predictions(analysis: DailyAnalysis) -> bool:
+    """Merge a pipeline run into that date's saved History. Returns True if written."""
+    now = datetime.now(UTC)
+    async with async_session_factory() as session, session.begin():
+        row = await session.get(DailyPrediction, analysis.date, with_for_update=True)
+        new = json.loads(analysis.model_dump_json())
+        data = combine_predictions(row.data if row else None, new, now)
+        if data is None:
+            logger.info(f"🔒 Nothing to save for {analysis.date}: every game already tipped off")
+            return False
+        if row is None:
+            session.add(DailyPrediction(
+                game_date=analysis.date, data=data, games_count=data["games_count"], saved_at=now,
+            ))
+        else:
+            row.data, row.games_count, row.saved_at = data, data["games_count"], now
     logger.info(
-        f"💾 Saved predictions for {analysis.date} → {filepath.name} "
-        f"({new_data['games_count']} games, {new_market_count} markets)"
+        f"💾 Saved predictions for {analysis.date} "
+        f"({data['games_count']} games, {_count_markets(data)} markets)"
     )
-    return filepath
+    return True
 
 
 def _merge_predictions(existing: dict, new: dict) -> dict:
@@ -202,38 +186,74 @@ def _merge_predictions(existing: dict, new: dict) -> dict:
     return result
 
 
-def load_predictions(game_date: date) -> DailyAnalysis | None:
+def _to_analysis(data: dict) -> DailyAnalysis:
+    data = {k: v for k, v in data.items() if k != "saved_at"}
+    return DailyAnalysis.model_validate(data)
+
+
+async def load_predictions(game_date: date) -> DailyAnalysis | None:
     """Load saved predictions for a specific date, or None if not found."""
-    filepath = PREDICTIONS_DIR / f"{game_date.isoformat()}.json"
-    if not filepath.exists():
+    async with async_session_factory() as session:
+        row = await session.get(DailyPrediction, game_date)
+    if row is None:
         return None
-
     try:
-        data = json.loads(filepath.read_text(encoding="utf-8"))
-        # Remove our extra field before parsing
-        data.pop("saved_at", None)
-        return DailyAnalysis.model_validate(data)
+        return _to_analysis(row.data)
     except Exception as e:
-        logger.warning(f"Failed to load predictions from {filepath}: {e}")
+        logger.warning(f"Failed to load predictions for {game_date}: {e}")
         return None
 
 
-def list_saved_dates() -> list[dict]:
-    """List all dates that have saved predictions.
+async def list_saved_dates() -> list[dict]:
+    """All dates with saved predictions, newest first.
 
-    Returns list of {date, games_count, saved_at, file_size_kb} sorted by date desc.
+    Returns list of {date, games_count, saved_at, file_size_kb}.
     """
-    _ensure_dir()
-    results = []
-    for filepath in sorted(PREDICTIONS_DIR.glob("*.json"), reverse=True):
+    async with async_session_factory() as session:
+        rows = await session.execute(
+            select(
+                DailyPrediction.game_date,
+                DailyPrediction.games_count,
+                DailyPrediction.saved_at,
+                func.pg_column_size(DailyPrediction.data),
+            ).order_by(DailyPrediction.game_date.desc())
+        )
+        return [
+            {
+                "date": d.isoformat(),
+                "games_count": count,
+                "saved_at": saved_at.isoformat() if saved_at else None,
+                "file_size_kb": round((size or 0) / 1024, 1),
+            }
+            for d, count, saved_at, size in rows
+        ]
+
+
+async def import_json_files(directory: Path = LEGACY_PREDICTIONS_DIR) -> list[str]:
+    """One-off: copy History JSON files (the old storage) into the database.
+
+    Dates already in the database are left alone. Returns the imported dates.
+    """
+    imported: list[str] = []
+    for path in sorted(directory.glob("*.json")):
         try:
-            data = json.loads(filepath.read_text(encoding="utf-8"))
-            results.append({
-                "date": filepath.stem,  # e.g. "2026-04-08"
-                "games_count": data.get("games_count", 0),
-                "saved_at": data.get("saved_at"),
-                "file_size_kb": round(filepath.stat().st_size / 1024, 1),
-            })
-        except Exception:
+            game_date = date.fromisoformat(path.stem)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            _to_analysis(data)  # validate before storing
+        except Exception as e:
+            logger.warning(f"Skipping {path.name}: {e}")
             continue
-    return results
+        async with async_session_factory() as session, session.begin():
+            if await session.get(DailyPrediction, game_date) is not None:
+                continue
+            saved_at = data.get("saved_at")
+            session.add(DailyPrediction(
+                game_date=game_date,
+                data=data,
+                games_count=data.get("games_count", len(data.get("games", []))),
+                saved_at=(
+                    datetime.fromisoformat(saved_at).astimezone() if saved_at else datetime.now(UTC)
+                ),
+            ))
+        imported.append(path.stem)
+    return imported

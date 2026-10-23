@@ -17,6 +17,7 @@ from sqlalchemy import (
     func,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.database import Base
@@ -141,6 +142,22 @@ class PolymarketMarket(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     game: Mapped["Game"] = relationship(back_populates="markets")
+
+
+class DailyPrediction(Base):
+    """History: one row per NBA date holding that day's saved DailyAnalysis.
+
+    Written by app.services.prediction_store, which merges runs and locks each
+    game at tip-off, so ``data`` is the pre-game prediction per game.
+    """
+    __tablename__ = "daily_predictions"
+
+    game_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    data: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    games_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    saved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class MarketSnapshot(Base):

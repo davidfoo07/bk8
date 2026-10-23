@@ -63,7 +63,7 @@ async def get_results_for_date(game_date: str) -> DailyResults:
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid date: {game_date}")
 
-    analysis = load_predictions(parsed_date)
+    analysis = await load_predictions(parsed_date)
     if analysis is None:
         raise HTTPException(status_code=404, detail=f"No saved predictions for {game_date}")
 
@@ -220,4 +220,4 @@ async def get_results_for_date(game_date: str) -> DailyResults:
 @router.get("/", response_model=list[dict])
 async def list_available_results() -> list[dict]:
     """List all dates that have saved predictions (suitable for results comparison)."""
-    return list_saved_dates()
+    return await list_saved_dates()

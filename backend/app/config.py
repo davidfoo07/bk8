@@ -85,3 +85,18 @@ def current_season(today: date | None = None) -> str:
     if settings.nba_season_override:
         return settings.nba_season_override
     return season_for_date(today or date.today(), settings.season_rollover_month)
+
+
+def sync_database_url(async_url: str | None = None) -> str:
+    """psycopg2 URL for the same database as ``database_url`` (used by Alembic).
+
+    Derived rather than configured separately, so pointing DATABASE_URL at a new
+    host (e.g. Supabase) is enough.  asyncpg's ``ssl=`` becomes psycopg2's ``sslmode=``.
+    """
+    from sqlalchemy.engine import make_url
+
+    url = make_url(async_url or settings.database_url).set(drivername="postgresql+psycopg2")
+    query = dict(url.query)
+    if "ssl" in query:
+        query["sslmode"] = query.pop("ssl")
+    return url.set(query=query).render_as_string(hide_password=False)
