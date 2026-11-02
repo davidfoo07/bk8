@@ -27,10 +27,10 @@ from app.analytics.edge_calculator import calculate_edge, cap_verdict, guard_mar
 from app.analytics.lineup_adjustment import OnOffSplitModel, compute_player_impact
 from app.analytics.prediction_model import (
     GAME_STD_DEV,
-    SPREAD_TO_WIN_PROB_SIGMA,
     TOTAL_STD_DEV,
     calculate_schedule_modifier,
     league_scoring_baseline,
+    margin_to_win_probability,
     predict_game,
 )
 from app.analytics.schedule_engine import calculate_schedule_context, determine_motivation
@@ -1136,11 +1136,11 @@ def _calculate_live_prediction(
     pre_game_remaining_margin = pre_game_margin * time_remaining_pct
     live_projected_final_margin = live_margin + pre_game_remaining_margin
 
-    # Win probability via logistic, with variance shrinking as time passes
-    adjusted_std = SPREAD_TO_WIN_PROB_SIGMA * math.sqrt(time_remaining_pct)
+    # Same margin distribution as pre-game, with variance shrinking as time passes
+    adjusted_std = GAME_STD_DEV * math.sqrt(time_remaining_pct)
     adjusted_std = max(adjusted_std, 0.5)  # Floor to avoid division issues
 
-    live_win_prob = 1.0 / (1.0 + math.exp(-live_projected_final_margin / adjusted_std))
+    live_win_prob = margin_to_win_probability(live_projected_final_margin, adjusted_std)
 
     return LivePrediction(
         home_win_prob=round(live_win_prob, 4),

@@ -5,7 +5,8 @@ Improvements over V1:
   - Multiplicative total estimation using per-team pace (not pace=100 hardcode)
   - Proper matchup pace calculation: geometric mean of both teams' pace
   - Late-season scoring bias correction (+1.0 pts for March/April)
-  - GAME_STD_DEV tuned from 12.0 → 11.5 (tighter probabilities, fewer coin-flips)
+  - One margin distribution (normal, σ=GAME_STD_DEV=13.0) for moneyline, spread
+    cover and the live model, so the markets agree with each other
   - Over/under standard deviation separate from spread stdev (backtested
     σ_total ≈ 19)
   - Totals level tracks the current season's league scoring, not last season's
@@ -28,9 +29,13 @@ from app.schemas.prediction import GamePrediction
 # Tuned against 2024-25 and early 2025-26 historical data.
 
 HOME_COURT_ADVANTAGE = 3.0         # points; NBA long-run average ≈ 2.8-3.2
-SPREAD_TO_WIN_PROB_SIGMA = 5.8     # logistic function width; lower = more decisive
-                                    # (V1 was 6.0; 5.8 better calibrates 60-70% picks)
-GAME_STD_DEV = 11.5                # spread variance; NBA actual ≈ 11-12
+GAME_STD_DEV = 13.0                # σ of (actual margin − projected margin), used for
+                                    # win prob, spread cover and the live model alike.
+                                    # Backtest 2025-26 (1,225 games, as-of-date ratings,
+                                    # no look-ahead): residual sd 14.6, best-fit probit
+                                    # σ 12.8-14.6.  The old logistic s=5.8 (≈ normal 10.5)
+                                    # priced 80%+ favourites at 87% that won 80%; the old
+                                    # cover σ=11.5 was tighter than any fit.
 TOTAL_STD_DEV = 19.0               # σ of (actual total − projected total).  Backtest
                                     # 2018-19…2025-26 (7.4k games, as-of-date ratings):
                                     # residual sd 18.7-19.6 per season; σ=19 maximises
@@ -168,10 +173,10 @@ def predict_game(
     Core prediction model (V2):
     1. NRtg differential → projected margin
     2. Add home court, schedule, motivation modifiers
-    3. Convert margin → win probability (logistic function, σ=5.8)
+    3. Convert margin → win probability (normal, σ=GAME_STD_DEV)
     4. Estimate total via multiplicative pace-adjusted formula
     5. Apply late-season bias correction
-    6. Calculate spread cover probability (σ=11.5)
+    6. Calculate spread cover probability (same σ, so cover at line 0 == win prob)
     7. Calculate over probability (σ=TOTAL_STD_DEV)
 
     league_ortg / league_pace / baseline_total come from
@@ -186,8 +191,8 @@ def predict_game(
     motivation_adj = _calculate_motivation_modifier(home_motivation, away_motivation)
     projected_margin = nrtg_diff + home_court_advantage + schedule_adj + motivation_adj
 
-    # Step 3: Margin → Win Probability (logistic function)
-    home_win_prob = 1.0 / (1.0 + math.exp(-projected_margin / SPREAD_TO_WIN_PROB_SIGMA))
+    # Step 3: Margin → Win Probability (same distribution as spread cover)
+    home_win_prob = margin_to_win_probability(projected_margin)
 
     # Step 4: Projected total (pace-adjusted multiplicative method)
     projected_total = estimate_total(
@@ -349,13 +354,13 @@ def league_scoring_baseline(
     }
 
 
-def margin_to_win_probability(margin: float) -> float:
-    """Convert a projected margin to win probability using logistic function."""
-    return 1.0 / (1.0 + math.exp(-margin / SPREAD_TO_WIN_PROB_SIGMA))
+def margin_to_win_probability(margin: float, sigma: float = GAME_STD_DEV) -> float:
+    """P(win) for a projected margin: P(actual margin > 0), actual ~ N(margin, σ)."""
+    return float(norm.cdf(margin / sigma))
 
 
 def win_probability_to_margin(prob: float) -> float:
     """Convert a win probability back to projected margin."""
     if prob <= 0 or prob >= 1:
         return 0.0
-    return -SPREAD_TO_WIN_PROB_SIGMA * math.log((1.0 / prob) - 1.0)
+    return float(GAME_STD_DEV * norm.ppf(prob))

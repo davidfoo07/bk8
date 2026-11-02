@@ -90,8 +90,9 @@ season blended with a prior by games played (`w = gp/(gp+15)`). The prior is **r
 current roster rated on last season's player impact (2024-25 at half weight for players who
 missed last season), regressed 0.6 toward league average. Injuries subtract player impact
 (relative to the team the stats were earned on, shrunk for small samples). NRtg diff + home
-court (3.0) + schedule → margin → win prob (logistic σ=5.8), spread cover (σ=11.5), total
-(league scoring baseline that adapts fast early season, σ=19).
+court (3.0) + schedule → margin. One normal margin distribution (σ=13, backtested on 2025-26
+as-of-date projections) gives win prob, spread cover and the live model — keep them on the same
+σ. Total: league scoring baseline that adapts fast early season, σ=19.
 
 ## Rules the app enforces (don't break these)
 
@@ -113,12 +114,14 @@ court (3.0) + schedule → margin → win prob (logistic σ=5.8), spread cover (
 ## Where things stand (Oct 2026, start of 2026-27 season)
 
 - History: Oct 22 (good), Oct 23 (saved early with the *old* model — ignore for accuracy),
-  Oct 24 missing (app was off). Real tracking starts Oct 25.
+  Oct 24–26 missing (app was off). Real tracking starts Oct 27. The app now runs detached
+  (`caffeinate -dis npm run dev`, log in `courtedge/courtedge.log`), not via the preview panel,
+  which stops when the Claude app closes.
 - Model vs Market evaluation needs 100+ graded games before it means anything.
 - Known open issues: LAC@LAL and MIA@CHA style large disagreements not fully explained (guard
-  catches them); win-prob vs spread-cover σ inconsistency (needs graded games to fix); a few
-  STRONG BUYs sit just under the 0.15 guard. Closing-line value can't be measured yet (no price
-  history stored).
+  catches them); several STRONG BUYs sit just under the 0.15 guard. Whether verdicts should use a
+  market-blended probability can't be tested yet, and closing-line value can't be measured —
+  both need stored Polymarket price history.
 - Hosting: none. No VPS (deploy workflow removed), no CI by choice — don't add CI. Runs on
   the owner's Mac; it must stay awake overnight for History to record games.
 

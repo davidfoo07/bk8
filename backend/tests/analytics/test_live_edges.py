@@ -2,16 +2,17 @@
 
 import pytest
 
+from app.analytics.prediction_model import margin_to_win_probability
 from app.schemas.prediction import GamePrediction
 from app.services.pipeline import _calculate_live_prediction, _live_market_probs
 
-# DEN @ OKC pre-game: OKC by 8.9, total 233.3, OKC 82%
+# DEN @ OKC pre-game: OKC by 8.9, total 233.3
 PRE_GAME = GamePrediction(
     nrtg_differential=5.9,
     schedule_adjustment=0.0,
     projected_spread=-8.9,
     projected_total=233.3,
-    home_win_prob=0.823,
+    home_win_prob=margin_to_win_probability(8.9),
     spread_cover_prob=0.51,
     over_prob=0.437,
 )

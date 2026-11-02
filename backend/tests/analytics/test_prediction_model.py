@@ -259,8 +259,18 @@ class TestProbabilityConversion:
         assert recovered == pytest.approx(original, abs=0.01)
 
     def test_large_margin(self):
-        """Large positive margin → high probability."""
-        assert margin_to_win_probability(20.0) > 0.95
+        """Large positive margin → high probability (σ=13: a 20-pt favourite ≈ 94%)."""
+        assert 0.92 < margin_to_win_probability(20.0) < 0.96
+
+    def test_win_prob_matches_spread_cover_at_pickem(self):
+        """One distribution: P(win) == P(cover a 0 line) for any margin."""
+        for margin in (-7.0, 0.0, 3.5, 10.0):
+            pred = predict_game(
+                home_adj_nrtg=margin - 3.0, away_adj_nrtg=0.0,  # + 3.0 home court
+                home_adj_ortg=115, home_adj_drtg=115, away_adj_ortg=115, away_adj_drtg=115,
+                spread_line=0.0,
+            )
+            assert pred.home_win_prob == pytest.approx(pred.spread_cover_prob, abs=1e-3)
 
     def test_negative_margin(self):
         """Negative margin → low probability."""
