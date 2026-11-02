@@ -281,6 +281,14 @@ async def run_daily_pipeline(
     except Exception as e:
         logger.warning(f"Failed to save market snapshots: {e}")
 
+    # Append-only price log for closing-line value (pre-tip-off games only)
+    try:
+        from app.services.news_tracker import record_market_ticks
+
+        await record_market_ticks(result)
+    except Exception as e:
+        logger.warning(f"Failed to record market ticks: {e}")
+
     return result
 
 

@@ -11,7 +11,7 @@ from app.models.database import async_session_factory
 from app.models.tables import DailyPrediction
 from app.schemas.game import DailyAnalysis
 from app.services import evaluation
-from app.services.evaluation import MIN_GAMES, _yes_outcome, evaluate
+from app.services.evaluation import MIN_GAMES, _yes_outcome, clv_status, evaluate
 
 DAY = date(2026, 10, 22)
 
@@ -175,10 +175,13 @@ class TestBets:
 
 
 class TestClv:
-    def test_reported_unsupported(self):
+    def test_supported_from_market_ticks(self):
         out = evaluate([])
-        assert out.clv.supported is False
-        assert "append-only" in out.clv.needed
+        assert out.clv.supported is True and out.clv.n == 0 and out.clv.mean is None
+
+    def test_clv_stats(self):
+        st = clv_status([0.04, -0.02, 0.01])
+        assert st.n == 3 and st.mean == 0.01 and st.positive_rate == round(2 / 3, 3)
 
 
 class TestEndpoint:

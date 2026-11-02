@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date
+from datetime import date, datetime, timezone, UTC
 from typing import Any
 
 import httpx
@@ -103,6 +103,46 @@ class PolymarketConnector(BaseConnector):
         except Exception as e:
             logger.warning(f"Failed to fetch Polymarket event {slug}: {e}")
             return None
+
+    async def get_price_history(
+        self, token_id: str, start: datetime, end: datetime, fidelity_minutes: int = 1,
+    ) -> list[tuple[datetime, float]]:
+        """Minute-level price history for one outcome token (CLOB API).
+
+        Works after the fact, so price moves around any past moment can be
+        reconstructed.  Returns [(time, price)] sorted by time.
+        """
+        data = await self.fetch(
+            "https://clob.polymarket.com/prices-history",
+            params={
+                "market": token_id,
+                "startTs": int(start.timestamp()),
+                "endTs": int(end.timestamp()),
+                "fidelity": fidelity_minutes,
+            },
+        )
+        points = [
+            (datetime.fromtimestamp(int(p["t"]), tz=UTC), float(p["p"]))
+            for p in (data or {}).get("history", [])
+            if "t" in p and "p" in p
+        ]
+        return sorted(points)
+
+    @staticmethod
+    def moneyline_token(event: dict[str, Any], team_nickname: str) -> str | None:
+        """CLOB token id of the full-game moneyline outcome for a team (by nickname)."""
+        for market in event.get("markets") or []:
+            if market.get("sportsMarketType") != "moneyline":
+                continue
+            try:
+                outcomes = json.loads(market.get("outcomes") or "[]")
+                tokens = json.loads(market.get("clobTokenIds") or "[]")
+            except (TypeError, json.JSONDecodeError):
+                return None
+            for outcome, token in zip(outcomes, tokens, strict=False):
+                if team_nickname.lower() in str(outcome).lower():
+                    return str(token)
+        return None
 
     async def get_games_for_date(
         self,

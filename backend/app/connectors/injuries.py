@@ -173,6 +173,10 @@ class InjuryFeedConnector(BaseConnector):
                         "reason": reason or espn_status,
                         "source": "ESPN",
                         "last_updated": datetime.now().isoformat(),
+                        # For news tracking: ESPN's own update time, raw status, blurb
+                        "news_at": inj.get("date"),
+                        "espn_status": espn_status,
+                        "comment": inj.get("shortComment") or None,
                     })
         except Exception as e:
             logger.error(f"Error parsing ESPN injuries: {e}")

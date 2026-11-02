@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Header from "@/components/Header";
 import type { BetHistoryResponse, BetResponse } from "@/types/api";
-import { api, type ModelEvaluation, type MarketCalibration } from "@/lib/api";
+import { api, type InjuryLagReport, type ModelEvaluation, type MarketCalibration } from "@/lib/api";
 import {
   ResponsiveContainer,
   LineChart,
@@ -240,13 +240,123 @@ function ModelVsMarket({ evaluation }: { evaluation: ModelEvaluation }) {
 
       <div className="text-xs text-[#64748b] border-t border-[#1e293b] pt-3">
         <span className="font-medium text-[#94a3b8]">Closing-line value: </span>
-        {evaluation.clv.supported ? "available" : (
+        {!evaluation.clv.supported ? (
           <>
             not measurable yet. {evaluation.clv.reason} <span className="text-[#94a3b8]">Needed:</span>{" "}
             {evaluation.clv.needed}
           </>
+        ) : evaluation.clv.n === 0 || evaluation.clv.mean == null ? (
+          <>no flagged markets have closed yet. {evaluation.clv.reason}</>
+        ) : (
+          <>
+            <span className={evaluation.clv.mean > 0 ? "text-[#00C853]" : "text-[#FF1744]"}>
+              {cents(evaluation.clv.mean)}
+            </span>{" "}
+            avg move toward the model&apos;s side by tip-off
+            {evaluation.clv.se != null && <> (±{cents(evaluation.clv.se)})</>}, {evaluation.clv.n} markets,{" "}
+            {Math.round((evaluation.clv.positive_rate ?? 0) * 100)}% positive. {evaluation.clv.needed}
+          </>
         )}
       </div>
+    </section>
+  );
+}
+
+/** 0.034 → "+3.4c" */
+function cents(v: number | null | undefined): string {
+  if (v == null) return "—";
+  const c = v * 100;
+  return `${c > 0 ? "+" : ""}${c.toFixed(1)}c`;
+}
+
+function moveColor(v: number | null | undefined): string {
+  if (v == null || Math.abs(v) < 0.01) return "text-[#64748b]";
+  return v > 0 ? "text-[#00C853]" : "text-[#FF1744]";
+}
+
+/** Injury news on key players vs how fast the team's Polymarket price reacted */
+function InjuryNewsLag({ report }: { report: InjuryLagReport }) {
+  const { summary } = report;
+  const fmtTime = (iso: string) =>
+    new Date(iso).toLocaleString("en-US", {
+      timeZone: "Asia/Singapore", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+    });
+  return (
+    <section className="bg-[#111827] border border-[#1e293b] rounded-lg p-4 mb-6">
+      <div className="mb-3">
+        <h2 className="text-sm font-semibold text-[#e2e8f0]">Injury news vs Polymarket</h2>
+        <p className="text-xs text-[#64748b] mt-0.5">
+          Does the price react before or after ESPN posts a status change? Key players only
+          (model impact ≥ {report.min_impact} NRtg), team moneyline, minute-level prices. Moves are signed:
+          + = toward what the news implies.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+        {[
+          ["Status changes measured", String(summary.events)],
+          ["Median share of move after ESPN", summary.median_share_after == null ? "—" : `${Math.round(summary.median_share_after * 100)}%`],
+          ["Avg move left after 2 min", cents(summary.mean_tradable_move)],
+          ["Changes with ≥2c left", String(summary.tradable_2c)],
+        ].map(([label, value]) => (
+          <div key={label} className="bg-[#0d1320] border border-[#1e293b] rounded p-3">
+            <div className="text-[10px] uppercase text-[#64748b]">{label}</div>
+            <div className="text-lg font-mono text-[#e2e8f0]">{value}</div>
+          </div>
+        ))}
+      </div>
+      {summary.events < 30 && (
+        <p className="text-xs text-[#FFD600] mb-3">
+          {summary.events} status changes so far — too few to conclude. Changes only count once the previous status is
+          known (logging started Nov 2), so this fills in over the coming weeks.
+        </p>
+      )}
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-[10px] text-[#64748b] uppercase bg-[#0d1320]">
+              <th className="text-left py-2 px-2">News (SGT)</th>
+              <th className="text-left py-2 px-2">Player</th>
+              <th className="text-left py-2 px-2">Change</th>
+              <th className="text-right py-2 px-2">Impact</th>
+              <th className="text-left py-2 px-2">Next game</th>
+              <th className="text-right py-2 px-2">Before</th>
+              <th className="text-right py-2 px-2">After</th>
+              <th className="text-right py-2 px-2">Left @2min</th>
+            </tr>
+          </thead>
+          <tbody>
+            {report.events.slice(0, 40).map((e) => (
+              <tr key={`${e.player_name}-${e.event_time}-${e.status}`} className="border-t border-[#1e293b]" title={e.comment ?? ""}>
+                <td className="py-1.5 px-2 font-mono text-[#94a3b8] whitespace-nowrap">
+                  {fmtTime(e.event_time)}
+                  {e.timestamp_source !== "espn" && <span className="text-[#64748b]"> *</span>}
+                </td>
+                <td className="py-1.5 px-2 text-[#e2e8f0] whitespace-nowrap">{e.player_name} <span className="text-[#64748b]">{e.team}</span></td>
+                <td className="py-1.5 px-2 whitespace-nowrap">
+                  <span className="text-[#64748b]">{e.prev_status ?? "first seen"}</span> → {e.status}
+                </td>
+                <td className="py-1.5 px-2 text-right font-mono">{e.impact_nrtg?.toFixed(1) ?? "—"}</td>
+                <td className="py-1.5 px-2 font-mono text-[#94a3b8] whitespace-nowrap">{e.game_id?.slice(11).replace("_", " @ ") ?? "—"}</td>
+                {e.reaction ? (
+                  <>
+                    <td className={`py-1.5 px-2 text-right font-mono ${moveColor(e.reaction.moved_before)}`}>{cents(e.reaction.moved_before)}</td>
+                    <td className={`py-1.5 px-2 text-right font-mono ${moveColor(e.reaction.moved_after)}`}>{cents(e.reaction.moved_after)}</td>
+                    <td className={`py-1.5 px-2 text-right font-mono ${moveColor(e.reaction.tradable_move)}`}>{cents(e.reaction.tradable_move)}</td>
+                  </>
+                ) : (
+                  <td colSpan={3} className="py-1.5 px-2 text-right text-[#64748b]">{e.note ?? "—"}</td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-[10px] text-[#64748b] mt-2">
+        Before = 30 min before the news → news time. After = news → +30 min (capped at tip-off). * = time we detected it
+        (player dropped off the report), not ESPN&apos;s timestamp.
+      </p>
     </section>
   );
 }
@@ -259,11 +369,13 @@ const tooltipStyle = { background: "#1a2235", border: "1px solid #1e293b", borde
 export default function ModelAccuracy() {
   const [history, setHistory] = useState<BetHistoryResponse | null>(null);
   const [evaluation, setEvaluation] = useState<ModelEvaluation | null>(null);
+  const [injuryLag, setInjuryLag] = useState<InjuryLagReport | null>(null);
   const [loading, setLoading] = useState(true);
 
   const loadData = useCallback(async () => {
     // Grading fetches final scores per date — don't hold the bet charts on it.
     api.getModelEvaluation().then(setEvaluation, () => setEvaluation(null));
+    api.getInjuryLag().then(setInjuryLag, () => setInjuryLag(null));
     try {
       const data = await api.getBetHistory();
       setHistory(data);
@@ -306,6 +418,7 @@ export default function ModelAccuracy() {
         </div>
 
         {evaluation && <ModelVsMarket evaluation={evaluation} />}
+        {injuryLag && <InjuryNewsLag report={injuryLag} />}
 
         {!loading && !hasEnoughData && (
           <div className="bg-[#2979FF]/10 border border-[#2979FF]/20 rounded-lg p-4 mb-6">

@@ -2,11 +2,12 @@
 
 from datetime import date
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from loguru import logger
 from pydantic import BaseModel
 
 from app.services.evaluation import ModelEvaluation, build_evaluation
+from app.services.news_tracker import InjuryLagReport, injury_lag_report
 from app.services.pipeline import fetch_scores
 from app.services.prediction_store import list_saved_dates, load_predictions
 
@@ -54,6 +55,15 @@ class DailyResults(BaseModel):
     avg_total_error: float | None = None
     avg_spread_error: float | None = None
     total_bias: float | None = None
+
+
+@router.get("/injury-lag", response_model=InjuryLagReport)
+async def get_injury_lag(
+    days: int = Query(14, ge=1, le=60),
+    min_impact: float = Query(1.0, ge=0.0, le=10.0),
+) -> InjuryLagReport:
+    """Injury news on key players vs how fast the team's Polymarket price reacted."""
+    return await injury_lag_report(days=days, min_impact=min_impact)
 
 
 @router.get("/evaluation", response_model=ModelEvaluation)

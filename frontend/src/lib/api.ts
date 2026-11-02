@@ -99,7 +99,51 @@ export interface ModelEvaluation {
   conclusive: boolean;
   calibration: MarketCalibration[];
   bets: BetRecord[];
-  clv: { supported: boolean; reason: string; needed: string };
+  clv: {
+    supported: boolean;
+    reason: string;
+    needed: string;
+    n: number;
+    mean: number | null; // price move toward the model's side (0.01 = 1c)
+    se: number | null;
+    positive_rate: number | null;
+  };
+}
+
+export interface InjuryReaction {
+  prices: Record<string, number | null>; // minutes from the news → price
+  moved_before: number; // + = toward what the news implies
+  moved_after: number;
+  tradable_move: number; // still available one poll (2 min) after ESPN posted
+  share_after: number | null;
+}
+
+export interface InjuryNewsEvent {
+  player_name: string;
+  team: string;
+  kind: string;
+  status: string;
+  prev_status: string | null;
+  comment: string | null;
+  event_time: string;
+  timestamp_source: string;
+  impact_nrtg: number | null;
+  game_id: string | null;
+  tipoff: string | null;
+  reaction: InjuryReaction | null;
+  note: string | null;
+}
+
+export interface InjuryLagReport {
+  since: string;
+  min_impact: number;
+  summary: {
+    events: number;
+    median_share_after: number | null;
+    mean_tradable_move: number | null;
+    tradable_2c: number;
+  };
+  events: InjuryNewsEvent[];
 }
 
 export const api = {
@@ -153,6 +197,10 @@ export const api = {
 
   /** Model vs Polymarket calibration + BUY-verdict ROI over all graded History */
   getModelEvaluation: () => fetchJSON<ModelEvaluation>("/results/evaluation"),
+
+  /** Injury news on key players vs how the team's Polymarket price reacted */
+  getInjuryLag: (days = 14, minImpact = 1.0) =>
+    fetchJSON<InjuryLagReport>(`/results/injury-lag?days=${days}&min_impact=${minImpact}`),
 
   /** List all dates available for simulation */
   getSimulationDates: () => fetchJSON<SavedDateEntry[]>("/simulation/"),

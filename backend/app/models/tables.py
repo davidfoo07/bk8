@@ -9,6 +9,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    Index,
     ForeignKey,
     Integer,
     Numeric,
@@ -158,6 +159,55 @@ class DailyPrediction(Base):
     saved_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class InjuryNews(Base):
+    """Append-only log of ESPN injury-status updates (one row per new update).
+
+    ``news_at`` is ESPN's own timestamp for the update; ``detected_at`` is when
+    CourtEdge first saw it (polled every ~2 min).  A player dropping off the
+    report is logged as kind="cleared" (status AVAILABLE, no ESPN timestamp).
+    Used to measure how fast Polymarket prices react to injury news.
+    """
+    __tablename__ = "injury_news"
+    __table_args__ = (
+        UniqueConstraint("player_key", "team", "kind", "status", "news_at", name="uq_injury_news"),
+        Index("ix_injury_news_player", "player_key", "team", "detected_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    player_key: Mapped[str] = mapped_column(String(64), nullable=False)  # ESPN id or name
+    player_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    team: Mapped[str] = mapped_column(String(3), nullable=False)
+    kind: Mapped[str] = mapped_column(String(10), nullable=False)  # update | cleared
+    status: Mapped[str] = mapped_column(String(15), nullable=False)  # OUT, QUESTIONABLE, AVAILABLE…
+    espn_status: Mapped[str | None] = mapped_column(String(30))
+    comment: Mapped[str | None] = mapped_column(Text)
+    news_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class MarketTick(Base):
+    """Append-only Polymarket price + model probability log, before tip-off.
+
+    Written on every pipeline run for the current slate's not-yet-started
+    games, so price movement (closing-line value) can be measured.
+    """
+    __tablename__ = "market_ticks"
+    __table_args__ = (Index("ix_market_ticks_game", "game_id", "market_type", "captured_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    game_date: Mapped[date] = mapped_column(Date, nullable=False)
+    game_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    tipoff: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    market_type: Mapped[str] = mapped_column(String(15), nullable=False)
+    line: Mapped[Decimal | None] = mapped_column(Numeric(5, 1))
+    price_home_yes: Mapped[Decimal] = mapped_column(Numeric(6, 4), nullable=False)
+    model_prob: Mapped[Decimal | None] = mapped_column(Numeric(6, 4))
+    verdict: Mapped[str | None] = mapped_column(String(15))
+    # Side the verdict points at: True = home / Over, False = away / Under, None = no edge
+    bet_side_yes: Mapped[bool | None] = mapped_column(Boolean)
 
 
 class MarketSnapshot(Base):

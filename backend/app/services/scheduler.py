@@ -12,7 +12,7 @@ Uses APScheduler running inside the FastAPI process.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -27,6 +27,7 @@ _refresh_status: dict[str, datetime | None] = {
     "pipeline": None,
     "injuries": None,
     "polymarket": None,
+    "injury_news": None,
 }
 
 
@@ -45,9 +46,9 @@ async def _refresh_pipeline() -> None:
     try:
         logger.info("⏰ Scheduled pipeline refresh starting...")
         analysis = await run_daily_pipeline()
-        _refresh_status["pipeline"] = datetime.now(timezone.utc)
-        _refresh_status["injuries"] = datetime.now(timezone.utc)
-        _refresh_status["polymarket"] = datetime.now(timezone.utc)
+        _refresh_status["pipeline"] = datetime.now(UTC)
+        _refresh_status["injuries"] = datetime.now(UTC)
+        _refresh_status["polymarket"] = datetime.now(UTC)
         logger.info(
             f"⏰ Scheduled refresh complete: {analysis.games_count} games, "
             f"{len(analysis.top_edges)} edges"
@@ -74,10 +75,21 @@ async def _refresh_prices_only() -> None:
             if key in _cache._store:
                 del _cache._store[key]
 
-        _refresh_status["polymarket"] = datetime.now(timezone.utc)
+        _refresh_status["polymarket"] = datetime.now(UTC)
         logger.debug("⏰ Polymarket price cache invalidated")
     except Exception as e:
         logger.error(f"⏰ Polymarket cache invalidation failed: {e}")
+
+
+async def _poll_injury_news() -> None:
+    """Log new ESPN injury updates (for measuring Polymarket's reaction)."""
+    from app.services.news_tracker import poll_injury_news
+
+    try:
+        await poll_injury_news()
+        _refresh_status["injury_news"] = datetime.now(UTC)
+    except Exception as e:
+        logger.error(f"⏰ Injury news poll failed: {e}")
 
 
 def start_scheduler() -> None:
@@ -104,6 +116,16 @@ def start_scheduler() -> None:
         trigger=IntervalTrigger(minutes=2),
         id="price_invalidation",
         name="Polymarket price cache invalidation",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    # Injury news — every 2 minutes (ESPN only, one request)
+    scheduler.add_job(
+        _poll_injury_news,
+        trigger=IntervalTrigger(minutes=2),
+        id="injury_news",
+        name="ESPN injury news log",
         replace_existing=True,
         max_instances=1,
     )

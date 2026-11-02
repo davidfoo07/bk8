@@ -8,7 +8,8 @@ disagrees with the market will lose to it.
 
 Also grades every BUY / STRONG BUY verdict as a flat $1 bet at the saved price.
 
-Closing-line value is not measurable from what is stored (see CLV_NOTE).
+Closing-line value comes from the market_ticks price log (services/news_tracker.py):
+did the price move toward the side the model first flagged, before tip-off?
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from typing import TYPE_CHECKING
 from loguru import logger
 from pydantic import BaseModel
 
+from app.services.news_tracker import load_clv
 from app.services.pipeline import fetch_scores
 from app.services.prediction_store import list_saved_dates, load_predictions
 
@@ -65,6 +67,11 @@ class ClvStatus(BaseModel):
     supported: bool
     reason: str
     needed: str
+    # Measured from market_ticks (cents, + = price moved toward the model's side)
+    n: int = 0
+    mean: float | None = None
+    se: float | None = None
+    positive_rate: float | None = None
 
 
 class ModelEvaluation(BaseModel):
@@ -78,20 +85,24 @@ class ModelEvaluation(BaseModel):
 
 
 CLV_NOTE = ClvStatus(
-    supported=False,
+    supported=True,
     reason=(
-        "No price history is stored. daily_predictions keeps one locked pre-game "
-        "version per game, and market_snapshots keeps one row per game/market — the "
-        "highest-edge snapshot, selected on the edge itself — so there is no "
-        "first-vs-last-pre-tip pair to compare, and comparing the max-edge snapshot "
-        "to the locked price would show fake CLV from regression to the mean."
+        "From market_ticks, logged on every pipeline run before tip-off (since "
+        "2026-11-02): closing price − price when a BUY/STRONG BUY first appeared, on "
+        "that side, same line only. Real edges should show positive CLV."
     ),
-    needed=(
-        "An append-only market price log written on every pipeline run: game_id, "
-        "market_type, line, Polymarket home/yes price, model probability, fetched_at. "
-        "CLV = closing price − opening price on the model's side (same line only)."
-    ),
+    needed="Ticks accumulate nightly while the app runs; ~100 flagged markets to judge.",
 )
+
+
+def clv_status(values: list[float]) -> ClvStatus:
+    mean, se = _mean_se(values) if values else (None, None)
+    return CLV_NOTE.model_copy(update={
+        "n": len(values),
+        "mean": round(mean, 4) if mean is not None else None,
+        "se": round(se, 4) if se is not None else None,
+        "positive_rate": round(sum(v > 0 for v in values) / len(values), 3) if values else None,
+    })
 
 
 def _yes_outcome(market_type: str, line: float | None, home: int, away: int) -> bool | None:
@@ -243,4 +254,9 @@ async def build_evaluation(today: date | None = None) -> ModelEvaluation:
         return analysis, scores
 
     loaded = await asyncio.gather(*(load(d) for d in saved))
-    return evaluate([day for day in loaded if day is not None])
+    result = evaluate([day for day in loaded if day is not None])
+    try:
+        result.clv = clv_status(await load_clv())
+    except Exception as e:
+        logger.warning(f"Evaluation: CLV unavailable: {e}")
+    return result
